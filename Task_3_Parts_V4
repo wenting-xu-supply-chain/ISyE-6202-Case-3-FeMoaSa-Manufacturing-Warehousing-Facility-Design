@@ -1,0 +1,438 @@
+# -*- coding: utf-8 -*-
+"""
+FeMoaSa Casework 3 — Task 3.c Parts Organization (Steps 1–3) - CORRECTED
+网络组织 + 资源需求计划 + 中心布局面积估算
+Corrected version fixing the equipment selection alignment bug
+"""
+
+import math
+import os
+import itertools as it
+from collections import defaultdict
+import numpy as np
+import pandas as pd
+
+# ========================================
+# 0. 基础数据定义 (保持不变)
+# ========================================
+# 产品年需求
+product_demand = pd.Series({
+    'A1': 50000, 'A2': 100000, 'A3': 130000, 
+    'B1': 60000, 'B2': 80000
+}, name="YearlyProdDemand")
+
+# BOM数据
+bom_data = {
+    'P1': {'A1': 1, 'A2': 2, 'A3': 4, 'B1': 4, 'B2': 1},
+    'P2': {'A1': 4, 'A2': np.nan, 'A3': 2, 'B1': 2, 'B2': np.nan},
+    'P3': {'A1': np.nan, 'A2': np.nan, 'A3': np.nan, 'B1': 4, 'B2': 1},
+    'P4': {'A1': np.nan, 'A2': 1, 'A3': 2, 'B1': 2, 'B2': np.nan},
+    'P5': {'A1': np.nan, 'A2': 1, 'A3': 2, 'B1': np.nan, 'B2': np.nan},
+    'P6': {'A1': 1, 'A2': np.nan, 'A3': np.nan, 'B1': np.nan, 'B2': 2},
+    'P7': {'A1': np.nan, 'A2': 4, 'A3': np.nan, 'B1': np.nan, 'B2': 4},
+    'P8': {'A1': np.nan, 'A2': np.nan, 'A3': np.nan, 'B1': 4, 'B2': np.nan},
+    'P9': {'A1': np.nan, 'A2': 2, 'A3': 2, 'B1': np.nan, 'B2': np.nan},
+    'P10': {'A1': 1, 'A2': np.nan, 'A3': 1, 'B1': 1, 'B2': np.nan},
+    'P11': {'A1': 2, 'A2': np.nan, 'A3': np.nan, 'B1': np.nan, 'B2': 4},
+    'P12': {'A1': 4, 'A2': np.nan, 'A3': np.nan, 'B1': np.nan, 'B2': 4},
+    'P13': {'A1': 2, 'A2': np.nan, 'A3': np.nan, 'B1': np.nan, 'B2': 2},
+    'P14': {'A1': np.nan, 'A2': 4, 'A3': 2, 'B1': 2, 'B2': 2},
+    'P15': {'A1': np.nan, 'A2': np.nan, 'A3': np.nan, 'B1': 2, 'B2': np.nan},
+    'P16': {'A1': np.nan, 'A2': 1, 'A3': 4, 'B1': np.nan, 'B2': np.nan},
+    'P17': {'A1': 2, 'A2': np.nan, 'A3': np.nan, 'B1': np.nan, 'B2': 2},
+    'P18': {'A1': 4, 'A2': 1, 'A3': np.nan, 'B1': np.nan, 'B2': 4},
+    'P19': {'A1': np.nan, 'A2': 2, 'A3': 4, 'B1': 4, 'B2': 1},
+    'P20': {'A1': np.nan, 'A2': 2, 'A3': 3, 'B1': 3, 'B2': np.nan}
+}
+bom = pd.DataFrame(bom_data).T.fillna(0).astype(int)
+
+# 工艺路线
+routes = {
+    'P1': ['B', 'A', 'B', 'C', 'D', 'I', 'J'],
+    'P2': ['A', 'C', 'D', 'H', 'J'],
+    'P3': ['B', 'D', 'C', 'I', 'J'],
+    'P4': ['A', 'B', 'D', 'G', 'H'],
+    'P5': ['B', 'C', 'D', 'I'],
+    'P6': ['A', 'B', 'C', 'D', 'H', 'I', 'J'],
+    'P7': ['E', 'F', 'C', 'D', 'I', 'J'],
+    'P8': ['E', 'H', 'J', 'I'],
+    'P9': ['F', 'G', 'E', 'G', 'I', 'J'],
+    'P10': ['E', 'F', 'I', 'J'],
+    'P11': ['E', 'G', 'E', 'G', 'I'],
+    'P12': ['E', 'G', 'F', 'I', 'J'],
+    'P13': ['E', 'F', 'G', 'F', 'G', 'H', 'I'],
+    'P14': ['E', 'F', 'G', 'H'],
+    'P15': ['E', 'G', 'F', 'H', 'J'],
+    'P16': ['F', 'H', 'I', 'J'],
+    'P17': ['K', 'L', 'M'],
+    'P18': ['K', 'L', 'K', 'M'],
+    'P19': ['L', 'M', 'L', 'M'],
+    'P20': ['L', 'K', 'M']
+}
+
+# 工序时间数据
+process_times_data = {
+    'P1': [2.5, 1, 2.5, 0.5, 2.5, 1.25, 2.5],
+    'P2': [1.25, 0.5, 2.5, 1, 2.5],
+    'P3': [1.75, 3, 0.75, 1.5, 2.5],
+    'P4': [1, 2, 3, 0.25, 1.25],
+    'P5': [1.5, 0.75, 3.5, 1.75],
+    'P6': [0.75, 1.25, 0.5, 3, 1, 1.25, 2.75],
+    'P7': [1, 1.5, 0.75, 3.5, 1.25, 2],
+    'P8': [1.25, 2, 0.5, 1],
+    'P9': [1.75, 0.75, 1.25, 0.5, 1.25, 3],
+    'P10': [1.5, 1.75, 1.25, 2],
+    'P11': [1.25, 0.5, 1.25, 0.25, 0.75],
+    'P12': [1, 0.5, 1, 1.25, 2.25],
+    'P13': [1.25, 1.25, 0.5, 1, 0.25, 2, 1.25],
+    'P14': [1, 1.5, 0.5, 1.75],
+    'P15': [0.75, 0.5, 1.25, 2.5, 2.5],
+    'P16': [1.25, 5, 1.25, 2.5],
+    'P17': [0.75, 3, 3.5],
+    'P18': [0.75, 1.25, 0.5, 3.75],
+    'P19': [2.25, 2.5, 2, 3.75],
+    'P20': [2, 0.75, 3]
+}
+
+# 组合工艺路线和时间
+part_operations = {p: list(zip(routes[p], process_times_data[p])) for p in routes}
+
+# 设备数据
+equipment_data = {
+    'A': {'Price': 150000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'B': {'Price': 200000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'C': {'Price': 250000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'D': {'Price': 300000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'AB': {'Price': 250000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'AC': {'Price': 280000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'CD': {'Price': 350000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'ABC': {'Price': 300000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'ABCD': {'Price': 400000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'E': {'Price': 400000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'F': {'Price': 400000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'G': {'Price': 400000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'EF': {'Price': 450000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'EG': {'Price': 450000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'FG': {'Price': 450000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'EFG': {'Price': 500000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'H': {'Price': 1000000, 'Life': 15, 'Ops': {'C1': 0, 'C2': 0, 'C3': 2}},
+    'I': {'Price': 500000, 'Life': 15, 'Ops': {'C1': 0, 'C2': 0, 'C3': 2}},
+    'J': {'Price': 500000, 'Life': 15, 'Ops': {'C1': 0, 'C2': 0, 'C3': 2}},
+    'IJ': {'Price': 750000, 'Life': 15, 'Ops': {'C1': 0, 'C2': 0, 'C3': 2}},
+    'K': {'Price': 80000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'L': {'Price': 100000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'M': {'Price': 50000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'KL': {'Price': 140000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'KM': {'Price': 100000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'LM': {'Price': 120000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'KLM': {'Price': 150000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}}
+}
+equipment_df = pd.DataFrame.from_dict(equipment_data, orient='index')
+
+# ========================================
+# 1. 全局参数
+# ========================================
+SHIFTS = 2                 # 班次数
+EFFICIENCY = 0.90         # 设备效率
+RELIABILITY = 0.98        # 设备可靠性
+OEE = EFFICIENCY * RELIABILITY
+YEARLY_WEEKS = 52
+MIN_PER_YEAR_RAW = 8 * 60 * 5 * SHIFTS * YEARLY_WEEKS  
+EFFECTIVE_MIN_PER_MACHINE_YEARLY = MIN_PER_YEAR_RAW * OEE  
+Z_995 = 2.575829           # 99.5% 单侧 Z 值
+
+# 设备族的包络尺寸（英尺）
+envelope_dims_ft = {
+    'ABCD': (14, 18),
+    'EFG':  (22, 15),
+    'HIJ':  (14, 36),
+    'KLM':  (3, 76)
+}
+
+# 产品年变异系数
+product_cv = pd.Series({
+    'A1': 0.01442, 'A2': 0.01442, 'A3': 0.01663846,
+    'B1': 0.024, 'B2': 0.0090125
+}, name="YearlyCV")
+
+# ========================================
+# 2. 鲁棒年需求计算
+# ========================================
+def compute_robust_part_yearly(bom: pd.DataFrame,
+                               product_mean: pd.Series,
+                               product_cv: pd.Series,
+                               z: float = Z_995) -> pd.DataFrame:
+    """计算零件的年均、年标准差、年鲁棒需求"""
+    product_cv = product_cv.reindex(product_mean.index)
+    if product_cv.isna().any():
+        default_cv = 0.20 
+        product_cv = product_cv.fillna(default_cv)
+    
+    product_std = product_cv * product_mean
+    part_mean = bom.dot(product_mean)
+    part_var = bom.pow(2).dot(product_std.pow(2))
+    part_std = np.sqrt(part_var)
+    part_robust = np.ceil(part_mean + z * part_std)
+    
+    return pd.DataFrame({
+        'mean': part_mean, 
+        'std': part_std, 
+        'robust': part_robust
+    })
+
+robust_parts_yearly = compute_robust_part_yearly(bom, product_demand, product_cv, Z_995)
+
+# ========================================
+# 3. 设备选型逻辑
+# ========================================
+# 映射字母到设备族
+groups_by_letter = {
+    **{x: 'ABCD' for x in list('ABCD')},
+    **{x: 'EFG' for x in list('EFG')},
+    **{x: 'HIJ' for x in list('IJ')},
+    'H': 'H',  # H 单独成族
+    **{x: 'KLM' for x in list('KLM')}
+}
+
+# 各族可选设备与覆盖的工序
+coverage_options = {
+    'ABCD': {
+        'A': set('A'), 'B': set('B'), 'C': set('C'), 'D': set('D'),
+        'AB': set('AB'), 'AC': set('AC'), 'CD': set('CD'),
+        'ABC': set('ABC'), 'ABCD': set('ABCD')
+    },
+    'EFG': {
+        'E': set('E'), 'F': set('F'), 'G': set('G'),
+        'EF': set('EF'), 'EG': set('EG'), 'FG': set('FG'),
+        'EFG': set('EFG')
+    },
+    'HIJ': {
+        'H': set('H'), 'I': set('I'), 'J': set('J'), 
+        'IJ': set('IJ')
+    },
+    'H': {'H': set('H')},
+    'KLM': {
+        'K': set('K'), 'L': set('L'), 'M': set('M'),
+        'KL': set('KL'), 'KM': set('KM'), 'LM': set('LM'),
+        'KLM': set('KLM')
+    }
+}
+
+def _pairwise_disjoint(sets):
+    """检查集合是否两两不相交"""
+    seen = set()
+    for s in sets:
+        if not seen.isdisjoint(s):
+            return False
+        seen |= s
+    return True
+
+# 【关键修改：修正后的函数】
+def choose_equipment_for_group(required_letters: set,
+                               load_by_letter: dict,
+                               group_name: str,
+                               debug_part: str = None) -> dict:
+    """
+    为设备族选择最优设备组合
+    返回最小成本的设备配置方案 (已修复 Bug)
+    """
+    options = coverage_options['H'] if group_name == 'H' else coverage_options[group_name]
+    eq_types = list(options.keys())
+    best = None
+    best_detail = None
+    
+    for r in range(1, len(eq_types) + 1):
+        for comb in it.combinations(eq_types, r):
+            sets_ = [options[e] & required_letters for e in comb]
+
+            # --- 修复开始 ---
+            # 关键检查: 组合中的所有设备都必须有贡献（覆盖至少一个所需工序）。
+            # 如果有设备没有贡献（对应空集），则跳过该组合。
+            if any(not S for S in sets_):
+                continue
+            
+            # 现在 sets_ 中的所有集合都是非空的，且与 comb 长度一致。
+            # 原代码中的 nonempty 变量不再需要。
+            # --- 修复结束 ---
+
+            # 检查1: 是否覆盖了所有必需的工序？ (使用 sets_)
+            if set().union(*sets_) != required_letters:
+                continue
+            # 检查2: 覆盖是否不相交？ (使用 sets_)
+            if not _pairwise_disjoint(sets_):
+                continue
+                
+            # 计算成本和设备数量
+            total_cost = 0
+            total_units = 0
+            detail = {}
+            
+            # 【修复】现在可以安全地使用 zip(comb, sets_)
+            for e, S in zip(comb, sets_):
+                load = sum(load_by_letter[L] for L in S)
+                units = max(1, math.ceil(load / EFFECTIVE_MIN_PER_MACHINE_YEARLY))
+                cost = units * equipment_df.loc[e, 'Price']
+                total_cost += cost
+                total_units += units
+                detail[e] = {
+                    'covered': ''.join(sorted(S)), 
+                    'load_min_per_year': load,
+                    'units': units, 
+                    'cost': cost
+                }
+            
+            # 更新最优方案
+            if (best is None) or (total_cost < best) or \
+               (total_cost == best and total_units < best_detail['total_units']):
+                best = total_cost
+                best_detail = {
+                    'equip_plan': detail, 
+                    'total_cost': total_cost, 
+                    'total_units': total_units
+                }
+             
+    return best_detail
+
+# (以下辅助函数保持不变)
+def equipment_category(eq: str) -> str:
+    """获取设备所属类别"""
+    if set(eq) <= set('ABCD'): return 'ABCD'
+    if set(eq) <= set('EFG'):  return 'EFG'
+    if eq in {'H', 'I', 'J', 'IJ'}: return 'HIJ'
+    if set(eq) <= set('KLM'):  return 'KLM'
+    raise ValueError(f'Unknown equipment type: {eq}')
+
+def estimate_center_area(center_plan: dict) -> tuple[int, dict]:
+    """估算中心面积"""
+    total = 0
+    detail = {}
+    for e, info in center_plan.items():
+        cat = equipment_category(e)
+        w, h = envelope_dims_ft[cat]
+        area = w * h
+        qty = info['units']
+        subtotal = qty * area
+        total += subtotal
+        detail[e] = {
+            'category': cat, 
+            'units': qty,
+            'envelope_ft': f'{w}x{h}',
+            'area_ft2_per_unit': area,
+            'subtotal_ft2': subtotal
+        }
+    return total, detail
+
+def build_part_center_plan(part_id: str,
+                           ops_list: list[tuple[str, float]],
+                           robust_yearly_units: float) -> tuple[dict, dict, dict, int, dict]:
+    """为每个零件构建生产中心计划"""
+    # 计算每个字母的总工时
+    per_unit_time = defaultdict(float)
+    for op, t in ops_list:
+        per_unit_time[op] += t
+    
+    # 计算年负荷
+    load_by_letter = {op: t * robust_yearly_units for op, t in per_unit_time.items()}
+    
+    # 按族分组
+    letters = set(per_unit_time.keys())
+    requires = defaultdict(set)
+    for L in letters:
+        g = groups_by_letter[L]
+        if g == 'HIJ' and L == 'H':
+            g = 'H'
+        requires[g].add(L)
+    
+    # 逐族选型 (使用修正后的 choose_equipment_for_group)
+    center_plan = {}
+    for group, Ls in requires.items():
+        chosen = choose_equipment_for_group(Ls, load_by_letter, group, debug_part=part_id)
+        if chosen is None:
+            raise RuntimeError(f'Part {part_id}: cannot cover letters {Ls} in group {group}')
+        
+        for e, rec in chosen['equip_plan'].items():
+            if e not in center_plan:
+                center_plan[e] = {
+                    'units': 0, 
+                    'load_min_per_year': 0.0, 
+                    'covered': ''
+                }
+            center_plan[e]['units'] += rec['units']
+            center_plan[e]['load_min_per_year'] += rec['load_min_per_year']
+            # 记录该设备在该中心覆盖的工序
+            center_plan[e]['covered'] = ''.join(sorted(set(center_plan[e].get('covered', '') + rec['covered'])))
+
+    
+    # 计算操作员需求
+    ops_needed = {'C1': 0.0, 'C2': 0.0, 'C3': 0.0}
+    for e, info in center_plan.items():
+        ops = equipment_df.loc[e, 'Ops']
+        for c in ops_needed:
+            ops_needed[c] += info['units'] * ops[c]
+    
+    # 向上取整并乘以班次数
+    ops_needed = {c: int(math.ceil(v)) * SHIFTS for c, v in ops_needed.items()}
+    
+    # 估算面积
+    area_total_ft2, area_detail = estimate_center_area(center_plan)
+    
+    return center_plan, ops_needed, load_by_letter, area_total_ft2, area_detail
+
+# ========================================
+# 4. 生成20个零件中心并正确汇总
+# ========================================
+centers = {}
+# (省略中间计算过程，直接跳到结果汇总)
+# 逐个构建中心
+for part in robust_parts_yearly.index:
+    demand_robust = float(robust_parts_yearly.loc[part, 'robust'])
+    plan, ops, loads, area_ft2, area_detail = build_part_center_plan(
+        part, part_operations[part], demand_robust
+    )
+    
+    centers[part] = {
+        'robust_yearly_demand': demand_robust,
+        'equipment_plan': plan,
+        'operators': ops,
+        'area_ft2': area_ft2,
+        'area_detail': area_detail
+    }
+
+# ========================================
+# 8. 详细中心信息表
+# ========================================
+def create_center_summary_table(centers_dict: dict) -> pd.DataFrame:
+    """创建中心汇总表"""
+    rows = []
+    # 保证 P1-P20 的顺序
+    sorted_keys = sorted(centers_dict.keys(), key=lambda x: int(x[1:]))
+
+    for center_id in sorted_keys:
+        center_data = centers_dict[center_id]
+        
+        # 汇总该中心的设备
+        equipment_summary = []
+        total_machines = 0
+        # 确保设备按字母顺序显示
+        for eq, info in sorted(center_data['equipment_plan'].items()):
+            equipment_summary.append(f"{eq}:{info['units']}")
+            total_machines += info['units']
+        
+        rows.append({
+            'Center': center_id,
+            'Robust_Demand': int(center_data['robust_yearly_demand']),
+            'Total_Machines': total_machines,
+            'Equipment': ', '.join(equipment_summary),
+            'C1': center_data['operators']['C1'],
+            'C2': center_data['operators']['C2'],
+            'C3': center_data['operators']['C3'],
+            'Area_ft2': center_data['area_ft2']
+        })
+    
+    return pd.DataFrame(rows)
+
+print("=" * 78)
+print("Detailed Center Information (CORRECTED):")
+print("=" * 78)
+center_summary_df = create_center_summary_table(centers)
+print(center_summary_df.to_string(index=False))
