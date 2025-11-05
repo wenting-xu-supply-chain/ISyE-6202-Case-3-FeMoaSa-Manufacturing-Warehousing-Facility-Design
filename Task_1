@@ -17,8 +17,8 @@ SERVICE_LEVEL = 0.995
 Z_SCORE = norm.ppf(SERVICE_LEVEL)   # ≈ 2.576
 WEEKS_PER_YEAR = 52.0
 
-EXCEL_PATH = "/mnt/data/iSYE+6202+%26+6335+2025+Casework+3+FaMoaSa++Facility+Design+-+Tables+and+Basic+Layouts.xlsx"
-OUT_DIR = "/mnt/data/Task1_Outcome"
+EXCEL_PATH = "iSYE+6202+%26+6335+2025+Casework+3+FaMoaSa++Facility+Design+-+Tables+and+Basic+Layouts.xlsx"
+OUT_DIR = "Task1_Outcome"
 
 def natural_sort_index(idx):
     """Return labels sorted like P1, P2, ..., P10, ... by numeric suffix."""
