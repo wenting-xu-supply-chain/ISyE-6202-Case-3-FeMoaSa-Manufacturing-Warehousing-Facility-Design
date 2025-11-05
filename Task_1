@@ -5,156 +5,118 @@ import os
 
 # ============================================================
 # Georgia Tech ISyE 6202 & 6335 - Casework 3
-# Task 1: COMPLETE Capacity Plan Calculation
-# Based on user's code, expanded for robust capacity.
+# Task 1: Capacity Plan (Augmented, with natural P-order)
+# - Annual & Weekly per-part mean/std
+# - Robust annual demand (99.5%) & time roll-ups
+# - Natural index order: P1, P2, ..., P20
 # ============================================================
 
-# --- Constants from PDF ---
 EFFICIENCY = 0.90
 RELIABILITY = 0.98
 SERVICE_LEVEL = 0.995
-Z_SCORE = norm.ppf(SERVICE_LEVEL) # Approx 2.576
+Z_SCORE = norm.ppf(SERVICE_LEVEL)   # ≈ 2.576
+WEEKS_PER_YEAR = 52.0
 
-# === Step 1. Set up output folder ===
-output_dir = "Task1_Outcome"
-os.makedirs(output_dir, exist_ok=True)
-print(f"📁 Output directory set to: {output_dir}")
+EXCEL_PATH = "/mnt/data/iSYE+6202+%26+6335+2025+Casework+3+FaMoaSa++Facility+Design+-+Tables+and+Basic+Layouts.xlsx"
+OUT_DIR = "/mnt/data/Task1_Outcome"
 
-# === Step 2. Load Excel file ===
-excel_path = "iSYE+6202+%26+6335+2025+Casework+3+FaMoaSa++Facility+Design+-+Tables+and+Basic+Layouts.xlsx"
-print(f"Loading Excel file: {excel_path}...")
+def natural_sort_index(idx):
+    """Return labels sorted like P1, P2, ..., P10, ... by numeric suffix."""
+    def key(label):
+        s = str(label)
+        num = ''.join(ch for ch in s if ch.isdigit())
+        return (s.rstrip(num), int(num) if num.isdigit() else float('inf'))
+    return sorted(idx, key=key)
 
-# === Step 3. Read +1 Year Product Demand sheet (USER'S LOGIC) ===
-# User's header=16 (row 17) for average demand
-try:
-    demand_df_raw = pd.read_excel(excel_path, sheet_name="+1 Year Product Demand", header=16)
+def main():
+    os.makedirs(OUT_DIR, exist_ok=True)
 
-    # User's cleaning logic
-    demand_df = demand_df_raw[['Year', 'A1', 'A2', 'A3', 'B1', 'B2', 'Total']].dropna()
-    demand_df_clean = demand_df[demand_df['Year'].astype(str).str.startswith('+')].reset_index(drop=True)
+    # === Product demand (ANNUAL mean & std) ===
+    demand_avg_raw = pd.read_excel(EXCEL_PATH, sheet_name="+1 Year Product Demand", header=16)
+    demand_avg = demand_avg_raw[['Year','A1','A2','A3','B1','B2']].dropna()
+    demand_avg = demand_avg[demand_avg['Year'].astype(str).str.startswith('+')].reset_index(drop=True)
+    product_demand_avg = demand_avg.iloc[0][['A1','A2','A3','B1','B2']].astype(float)
 
-    # Extract AVG product demand (for user's calculation)
-    product_demand_avg = demand_df_clean.iloc[0][['A1','A2','A3','B1','B2']].astype(float)
-    print("Successfully read average product demand.")
+    demand_std_raw = pd.read_excel(EXCEL_PATH, sheet_name="+1 Year Product Demand", header=21)
+    demand_std = demand_std_raw.dropna(subset=['Year'])
+    demand_std = demand_std[demand_std['Year'].astype(str).str.startswith('+')].reset_index(drop=True)
+    product_demand_std = demand_std.iloc[0][['A1','A2','A3','B1','B2']].astype(float)
+    product_demand_var = product_demand_std ** 2
 
-    # === MY ADDITION: Read Standard Deviation ===
-    # Based on screenshots, the Std Dev table header is on row 22 (header=21)
-    stddev_df_raw = pd.read_excel(excel_path, sheet_name="+1 Year Product Demand", header=21)
-    
-    # Clean and get the '+1' row
-    stddev_df = stddev_df_raw.dropna(subset=['Year'])
-    stddev_df_clean = stddev_df[stddev_df['Year'].astype(str).str.startswith('+')].reset_index(drop=True)
-    
-    # Extract STD DEV product demand
-    product_demand_stddev = stddev_df_clean.iloc[0][['A1','A2','A3','B1','B2']].astype(float)
-    product_demand_var = product_demand_stddev**2
-    print("Successfully read product demand standard deviation.")
+    demand_avg.to_csv(os.path.join(OUT_DIR, "Product_Demand_Annual_Avg.csv"), index=False)
+    demand_std.to_csv(os.path.join(OUT_DIR, "Product_Demand_Annual_StdDev.csv"), index=False)
 
-    # === Step 4. Read +1 Year Parts per Product sheet (USER'S LOGIC) ===
-    # User's header=9 (row 10)
-    parts_df_raw = pd.read_excel(excel_path, sheet_name="+1 Year Parts per Product", header=9)
-
-    # User's cleaning logic
-    parts_df = parts_df_raw.rename(columns={
+    # === BOM ===
+    parts_raw = pd.read_excel(EXCEL_PATH, sheet_name="+1 Year Parts per Product", header=9)
+    parts_df = parts_raw.rename(columns={
         'Parts per Assembled Product Unit Demanded in Year +1 ': 'A1',
         'Unnamed: 3': 'A2',
         'Unnamed: 4': 'A3',
         'Unnamed: 5': 'B1',
         'Unnamed: 6': 'B2'
     })
-    parts_df = parts_df[['Part', 'A1', 'A2', 'A3', 'B1', 'B2']].dropna(subset=['Part'])
-    parts_df.reset_index(drop=True, inplace=True)
-    
-    # Prep for calculation: Set index and ensure numeric, fill NaNs
-    parts_bom_df = parts_df.set_index('Part')
-    parts_bom_df = parts_bom_df.apply(pd.to_numeric, errors='coerce').fillna(0)
-    parts_bom_df_sq = parts_bom_df**2
-    print("Successfully read and cleaned parts per product (BOM).")
+    parts_df = parts_df[['Part','A1','A2','A3','B1','B2']].dropna(subset=['Part']).reset_index(drop=True)
 
-    # === Step 5. Compute total annual parts demand (USER'S LOGIC) ===
-    parts_demand = parts_bom_df.copy()
+    # enforce P1..P20 in BOM
+    parts_df = parts_df.set_index('Part').loc[natural_sort_index(parts_df['Part'])].reset_index()
+    parts_bom = parts_df.set_index('Part').apply(pd.to_numeric, errors='coerce').fillna(0.0)
+    parts_bom_sq = parts_bom ** 2
+    parts_df.to_csv(os.path.join(OUT_DIR, "Parts_Per_Product_BOM.csv"), index=False)
+
+    # === Family-level annual view ===
+    parts_demand_by_family = parts_bom.copy()
     for col in ['A1','A2','A3','B1','B2']:
-        parts_demand[col] = parts_demand[col] * product_demand_avg[col]
-   parts_demand['Total Demand'] = parts_demand.sum(axis=1)
-    print("Calculated average parts demand (user's method).")
+        parts_demand_by_family[col] = parts_demand_by_family[col] * product_demand_avg[col]
+    parts_demand_by_family['Total Demand (Annual Avg)'] = parts_demand_by_family[['A1','A2','A3','B1','B2']].sum(axis=1)
+    parts_demand_by_family = parts_demand_by_family.loc[natural_sort_index(parts_demand_by_family.index)]
+    parts_demand_by_family.to_csv(os.path.join(OUT_DIR, "Parts_Total_Demand_By_Family_AnnualAvg.csv"))
 
-    # === MY ADDITION: Load Manual Process Time Data ===
-    # (Data from screenshots, as it's not in the Excel file)
+    # === Per-part annual & weekly ===
+    s_part_annual_mean = parts_bom.dot(product_demand_avg); s_part_annual_mean.name = "Annual_Demand_Mean_Units"
+    s_part_annual_var  = parts_bom_sq.dot(product_demand_var)
+    s_part_annual_std  = np.sqrt(s_part_annual_var);        s_part_annual_std.name = "Annual_Demand_StdDev_Units"
+
+    weekly_mean = (s_part_annual_mean / WEEKS_PER_YEAR); weekly_mean.name = "Weekly_Demand_Mean_Units"
+    weekly_std  = (s_part_annual_std  / np.sqrt(WEEKS_PER_YEAR)); weekly_std.name = "Weekly_Demand_StdDev_Units"
+
+    # === Process time & robust demand ===
     time_data = {
-        'Part': ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9', 'P10',
-                 'P11', 'P12', 'P13', 'P14', 'P15', 'P16', 'P17', 'P18', 'P19', 'P20'],
-        'Step 1': [2.5, 1.25, 1.75, 1.0, 1.5, 0.75, 1.0, 1.25, 1.75, 1.5, 1.25, 1.0, 1.25, 1.0, 0.75, 1.25, 0.75, 0.75, 2.25, 2.0],
-        'Step 2': [1.0, 0.5, 3.0, 2.0, 0.75, 1.25, 1.5, 2.0, 0.75, 1.75, 0.5, 0.5, 1.25, 1.5, 0.5, 5.0, 3.0, 1.25, 2.5, 0.75],
-        'Step 3': [2.5, 2.5, 0.75, 3.0, 3.5, 0.5, 0.75, 0.5, 1.25, 1.25, 1.25, 1.0, 0.5, 0.5, 1.25, 1.25, 3.5, 0.5, 2.0, 3.0],
-        'Step 4': [0.5, 1.0, 1.5, 0.25, 1.75, 3.0, 3.5, 1.0, 0.5, 2.0, 0.25, 1.25, 1.0, 1.75, 2.5, 2.5, 0.0, 3.75, 3.75, 0.0],
-        'Step 5': [2.5, 2.5, 2.5, 1.25, 0.0, 1.0, 1.25, 0.0, 1.25, 0.0, 0.75, 2.25, 0.25, 0.0, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0],
-        'Step 6': [1.25, 0.0, 0.0, 0.0, 0.0, 1.25, 2.0, 0.0, 3.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        'Step 7': [2.5, 0.0, 0.0, 0.0, 0.0, 2.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        'Part': ['P1','P2','P3','P4','P5','P6','P7','P8','P9','P10','P11','P12','P13','P14','P15','P16','P17','P18','P19','P20'],
+        'Step 1': [2.5,1.25,1.75,1.0,1.5,0.75,1.0,1.25,1.75,1.5,1.25,1.0,1.25,1.0,0.75,1.25,0.75,0.75,2.25,2.0],
+        'Step 2': [1.0,0.5,3.0,2.0,0.75,1.25,1.5,2.0,0.75,1.75,0.5,0.5,1.25,1.5,0.5,5.0,3.0,1.25,2.5,0.75],
+        'Step 3': [2.5,2.5,0.75,3.0,3.5,0.5,0.75,0.5,1.25,1.25,1.25,1.0,0.5,0.5,1.25,1.25,3.5,0.5,2.0,3.0],
+        'Step 4': [0.5,1.0,1.5,0.25,1.75,3.0,3.5,1.0,0.5,2.0,0.25,1.25,1.0,1.75,2.5,2.5,0.0,3.75,3.75,0.0],
+        'Step 5': [2.5,2.5,2.5,1.25,0.0,1.0,1.25,0.0,1.25,0.0,0.75,2.25,0.25,0.0,2.5,0.0,0.0,0.0,0.0,0.0],
+        'Step 6': [1.25,0.0,0.0,0.0,0.0,1.25,2.0,0.0,3.0,0.0,0.0,0.0,2.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],
+        'Step 7': [2.5,0.0,0.0,0.0,0.0,2.75,0.0,0.0,0.0,0.0,0.0,0.0,1.25,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
     }
-    df_time = pd.DataFrame(time_data).set_index('Part').fillna(0)
-    s_unit_time = df_time.sum(axis=1)
-    s_unit_time.name = "Total_Minutes_Per_Unit"
-    print("Loaded manually transcribed 'Parts Process Time' data.")
-    
-    # === MY ADDITION: Step 6. Calculate Full Capacity Plan ===
-    print("Calculating full robust capacity plan...")
-    
-    # Calculate Average Part Demand (Robust way)
-    s_part_demand_avg = parts_bom_df.dot(product_demand_avg)
-    s_part_demand_avg.name = "Avg_Annual_Demand_Units"
-    
-    # Calculate Part Demand StdDev
-    s_part_var = parts_bom_df_sq.dot(product_demand_var)
-    s_part_stddev = np.sqrt(s_part_var)
-    s_part_stddev.name = "Annual_Demand_StdDev"
-    
-    # Calculate Robust Part Demand (Units)
-    s_robust_demand = s_part_demand_avg + Z_SCORE * s_part_stddev
-    s_robust_demand.name = "Robust_Annual_Demand (99.5%)"
-        # Calculate Robust Net Time (Minutes)
-    s_robust_net_time = s_robust_demand * s_unit_time
-    s_robust_net_time.name = "Robust_Annual_Net_Minutes"
-    
-    # Calculate Robust Gross Capacity Plan (Minutes)
-    s_robust_gross_time = s_robust_net_time / (EFFICIENCY * RELIABILITY)
-    s_robust_gross_time.name = "Robust_Annual_Capacity_Plan_Minutes"
-    
-    # Combine into one final DataFrame
-    df_task1_plan = pd.concat([
-        s_part_demand_avg,
-        s_part_stddev,
-        s_robust_demand,
-        s_unit_time,
-        s_robust_net_time,
-        s_robust_gross_time
-    ], axis=1)
-    
-    # === Step 7. Export all files ===
-    # User's files
-    demand_df_clean.to_csv(os.path.join(output_dir, "Product_Demand.csv"), index=False)
-    parts_df.to_csv(os.path.join(output_dir, "Parts_Per_Product.csv"), index=False)
-    parts_demand.to_csv(os.path.join(output_dir, "Parts_Total_Demand (Average).csv"), index=False) # Renamed for clarity
-    
-    # My file (The full answer)
-    df_task1_plan.to_csv(os.path.join(output_dir, "Task1_Full_Capacity_Plan.csv"))
-    print("Successfully exported all 4 CSV files.")
+    df_time = pd.DataFrame(time_data).set_index('Part').fillna(0.0)
+    s_minutes_per_unit = df_time.sum(axis=1); s_minutes_per_unit.name = "Total_Minutes_Per_Unit"
 
-    # === Step 8. Display summary ===
-    print("\n✅ Task 1 (Expanded) completed successfully!")
-    print(f"📁 All files saved in: {output_dir}")
-    print("\n--- Product_Demand.csv (Cleaned Avg) ---")
-    print(demand_df_clean.head())
-    print("\n--- Parts_Per_Product.csv (Cleaned) ---")
-    print(parts_df.head())
-    print("\n--- Parts_Total_Demand (Average).csv (User's calculation) ---")
-    print(parts_demand.head())
-    print("\n--- Task1_Full_Capacity_Plan.csv (FINAL ANSWER) ---")
-    print(df_task1_plan.head())
-except FileNotFoundError:
-    print(f"❌ FATAL ERROR: The file '{excel_path}' was not found.")
-except (KeyError, ValueError) as e:
-    print(f"❌ FATAL ERROR: A sheet name or column is incorrect: {e}")
-    print("Please check the sheet names ('+1 Year Product Demand', '+1 Year Parts per Product')")
-    print("And the header row numbers (16 and 9) used in the code.")
-except Exception as e:
-    print(f"An unexpected error occurred: {e}")
+    s_robust_annual_units  = s_part_annual_mean + Z_SCORE*s_part_annual_std; s_robust_annual_units.name = "Annual_Robust_Demand_99p5_Units"
+    s_robust_net_minutes   = s_robust_annual_units * s_minutes_per_unit;     s_robust_net_minutes.name = "Annual_Robust_Net_Minutes"
+    s_robust_gross_minutes = s_robust_net_minutes/(EFFICIENCY*RELIABILITY);  s_robust_gross_minutes.name = "Annual_Robust_Gross_Minutes"
+
+    # === Final table (enforced P1..P20 order) ===
+    df_final = pd.concat([
+        s_part_annual_mean,
+        s_part_annual_std,
+        weekly_mean,
+        weekly_std,
+        s_robust_annual_units,
+        s_minutes_per_unit,
+        s_robust_net_minutes,
+        s_robust_gross_minutes
+    ], axis=1)
+    df_final = df_final.loc[natural_sort_index(df_final.index)]
+
+    # Save
+    df_final.to_csv(os.path.join(OUT_DIR, "Task1_Full_Capacity_Plan_With_Weekly.csv"))
+    df_final[['Weekly_Demand_Mean_Units','Weekly_Demand_StdDev_Units']].to_csv(
+        os.path.join(OUT_DIR, "Task1_Per_Part_Weekly_Demand.csv")
+    )
+
+    print("✅ Saved (P1..P20 order):", os.path.abspath(OUT_DIR))
+
+if __name__ == "__main__":
+    main()
