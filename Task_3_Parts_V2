@@ -1,0 +1,845 @@
+# -*- coding: utf-8 -*-
+"""
+FeMoaSa Casework 3 — Task 3.c Parts Organization (Steps 1–3)
+网络组织 + 资源需求计划 + 中心布局面积估算
+Assumptions & sources:
+- 13 processes A–M, per-step minutes/unit, equipment families & operator needs, OEE=0.90×0.98, 1–2 shifts
+- 99.5% OTIF target → Z = 2.575829 for robust yearly capacity
+- Parts Organization: 20 part-dedicated centers; resources exclusive per center; logistics only RMC→Pi→FGC
+References: see casework PDF notes in main report.
+"""
+
+import math
+import itertools as it
+from collections import defaultdict
+
+import numpy as np
+import pandas as pd
+
+# -----------------------------
+# 0. 基础数据（来自你的底码）
+# -----------------------------
+product_demand = pd.Series({
+    'A1': 50000, 'A2': 100000, 'A3': 130000, 'B1': 60000, 'B2': 80000
+}, name="YearlyProdDemand")
+
+bom_data = {
+    'P1': {'A1': 1, 'A2': 2, 'A3': 4, 'B1': 4, 'B2': 1},
+    'P2': {'A1': 4, 'A2': np.nan, 'A3': 2, 'B1': 2, 'B2': np.nan},
+    'P3': {'A1': np.nan, 'A2': np.nan, 'A3': np.nan, 'B1': 4, 'B2': 1},
+    'P4': {'A1': np.nan, 'A2': 1, 'A3': 2, 'B1': 2, 'B2': np.nan},
+    'P5': {'A1': np.nan, 'A2': 1, 'A3': 2, 'B1': np.nan, 'B2': np.nan},
+    'P6': {'A1': 1, 'A2': np.nan, 'A3': np.nan, 'B1': np.nan, 'B2': 2},
+    'P7': {'A1': np.nan, 'A2': 4, 'A3': np.nan, 'B1': np.nan, 'B2': 4},
+    'P8': {'A1': np.nan, 'A2': np.nan, 'A3': np.nan, 'B1': 4, 'B2': np.nan},
+    'P9': {'A1': np.nan, 'A2': 2, 'A3': 2, 'B1': np.nan, 'B2': np.nan},
+    'P10': {'A1': 1, 'A2': np.nan, 'A3': 1, 'B1': 1, 'B2': np.nan},
+    'P11': {'A1': 2, 'A2': np.nan, 'A3': np.nan, 'B1': np.nan, 'B2': 4},
+    'P12': {'A1': 4, 'A2': np.nan, 'A3': np.nan, 'B1': np.nan, 'B2': 4},
+    'P13': {'A1': 2, 'A2': np.nan, 'A3': np.nan, 'B1': np.nan, 'B2': 2},
+    'P14': {'A1': np.nan, 'A2': 4, 'A3': 2, 'B1': 2, 'B2': 2},
+    'P15': {'A1': np.nan, 'A2': np.nan, 'A3': np.nan, 'B1': 2, 'B2': np.nan},
+    'P16': {'A1': np.nan, 'A2': 1, 'A3': 4, 'B1': np.nan, 'B2': np.nan},
+    'P17': {'A1': 2, 'A2': np.nan, 'A3': np.nan, 'B1': np.nan, 'B2': 2},
+    'P18': {'A1': 4, 'A2': 1, 'A3': np.nan, 'B1': np.nan, 'B2': 4},
+    'P19': {'A1': np.nan, 'A2': 2, 'A3': 4, 'B1': 4, 'B2': 1},
+    'P20': {'A1': np.nan, 'A2': 2, 'A3': 3, 'B1': 3, 'B2': np.nan}
+}
+bom = pd.DataFrame(bom_data).T.fillna(0).astype(int)
+
+routes = {
+    'P1': ['B', 'A', 'B', 'C', 'D', 'I', 'J'],
+    'P2': ['A', 'C', 'D', 'H', 'J'],
+    'P3': ['B', 'D', 'C', 'I', 'J'],
+    'P4': ['A', 'B', 'D', 'G', 'H'],
+    'P5': ['B', 'C', 'D', 'I'],
+    'P6': ['A', 'B', 'C', 'D', 'H', 'I', 'J'],
+    'P7': ['E', 'F', 'C', 'D', 'I', 'J'],
+    'P8': ['E', 'H', 'J', 'I'],
+    'P9': ['F', 'G', 'E', 'G', 'I', 'J'],
+    'P10': ['E', 'F', 'I', 'J'],
+    'P11': ['E', 'G', 'E', 'G', 'I'],
+    'P12': ['E', 'G', 'F', 'I', 'J'],
+    'P13': ['E', 'F', 'G', 'F', 'G', 'H', 'I'],
+    'P14': ['E', 'F', 'G', 'H'],
+    'P15': ['E', 'G', 'F', 'H', 'J'],
+    'P16': ['F', 'H', 'I', 'J'],
+    'P17': ['K', 'L', 'M'],
+    'P18': ['K', 'L', 'K', 'M'],
+    'P19': ['L', 'M', 'L', 'M'],
+    'P20': ['L', 'K', 'M']
+}
+
+process_times_data = {
+    'P1': [2.5, 1, 2.5, 0.5, 2.5, 1.25, 2.5],
+    'P2': [1.25, 0.5, 2.5, 1, 2.5],
+    'P3': [1.75, 3, 0.75, 1.5, 2.5],
+    'P4': [1, 2, 3, 0.25, 1.25],
+    'P5': [1.5, 0.75, 3.5, 1.75],
+    'P6': [0.75, 1.25, 0.5, 3, 1, 1.25, 2.75],
+    'P7': [1, 1.5, 0.75, 3.5, 1.25, 2],
+    'P8': [1.25, 2, 0.5, 1],
+    'P9': [1.75, 0.75, 1.25, 0.5, 1.25, 3],
+    'P10': [1.5, 1.75, 1.25, 2],
+    'P11': [1.25, 0.5, 1.25, 0.25, 0.75],
+    'P12': [1, 0.5, 1, 1.25, 2.25],
+    'P13': [1.25, 1.25, 0.5, 1, 0.25, 2, 1.25],
+    'P14': [1, 1.5, 0.5, 1.75],
+    'P15': [0.75, 0.5, 1.25, 2.5, 2.5],
+    'P16': [1.25, 5, 1.25, 2.5],
+    'P17': [0.75, 3, 3.5],
+    'P18': [0.75, 1.25, 0.5, 3.75],
+    'P19': [2.25, 2.5, 2, 3.75],
+    'P20': [2, 0.75, 3]
+}
+
+part_operations = {p: list(zip(routes[p], process_times_data[p])) for p in routes}
+
+equipment_data = {
+    'A': {'Price': 150000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'B': {'Price': 200000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'C': {'Price': 250000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'D': {'Price': 300000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'AB': {'Price': 250000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'AC': {'Price': 280000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'CD': {'Price': 350000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'ABC': {'Price': 300000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'ABCD': {'Price': 400000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0.25, 'C3': 0}},
+    'E': {'Price': 400000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'F': {'Price': 400000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'G': {'Price': 400000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'EF': {'Price': 450000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'EG': {'Price': 450000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'FG': {'Price': 450000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'EFG': {'Price': 500000, 'Life': 10, 'Ops': {'C1': 1, 'C2': 0, 'C3': 0.5}},
+    'H': {'Price': 1000000, 'Life': 15, 'Ops': {'C1': 0, 'C2': 0, 'C3': 2}},
+    'I': {'Price': 500000, 'Life': 15, 'Ops': {'C1': 0, 'C2': 0, 'C3': 2}},
+    'J': {'Price': 500000, 'Life': 15, 'Ops': {'C1': 0, 'C2': 0, 'C3': 2}},
+    'IJ': {'Price': 750000, 'Life': 15, 'Ops': {'C1': 0, 'C2': 0, 'C3': 2}},
+    'K': {'Price': 80000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'L': {'Price': 100000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'M': {'Price': 50000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'KL': {'Price': 140000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'KM': {'Price': 100000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'LM': {'Price': 120000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}},
+    'KLM': {'Price': 150000, 'Life': 8, 'Ops': {'C1': 0, 'C2': 0.5, 'C3': 0}}
+}
+equipment_df = pd.DataFrame.from_dict(equipment_data, orient='index')
+
+# -----------------------------
+# 1. 全局参数
+# -----------------------------
+SHIFTS = 2                 # 1 或 2 班；案例允许 1~2 班（工厂），仓储固定 2 班
+EFFICIENCY = 0.90          # 设备效率
+RELIABILITY = 0.98         # 设备可靠性
+OEE = EFFICIENCY * RELIABILITY
+Yearly_weeks = 52
+MIN_PER_YEAR_RAW = 8 * 60 * 5 * SHIFTS * Yearly_weeks # 年原始分钟
+EFFECTIVE_MIN_PER_MACHINE_YEARLY = MIN_PER_YEAR_RAW * OEE  # 单台设备每年有效加工分钟
+Z_995 = 2.575829           # 99.5% 单侧 Z 值
+
+# 设备族的典型包络尺寸（英尺）——供布局面积粗算；请按表单精确值校对
+envelope_dims_ft = {
+    'ABCD': (14, 18),
+    'EFG':  (22, 15),
+    'HIJ':  (14, 36),
+    'KLM':  (3, 76)
+}
+
+# 允许你在此粘贴真实年 CV；若留空，则默认 0.20
+product_cv = pd.Series({
+    'A1': 0.01442, 'A2': 0.01442, 'A3': 0.01663846,
+    'B1': 0.024, 'B2': 0.0090125
+}, name="YearlyCV") # <--- 修改了 name
+
+# -----------------------------
+# 2. 鲁棒年需求（产品→零件）
+# -----------------------------
+def compute_robust_part_yearly(bom: pd.DataFrame,
+                               product_mean: pd.Series,
+                               product_cv: pd.Series,
+                               z: float = Z_995) -> pd.DataFrame: # <--- 修改了函数名
+    """ 计算零件的年均、年标准差、年鲁棒需求 """
+    product_cv = product_cv.reindex(product_mean.index)
+    if product_cv.isna().any():
+        default_cv = 0.20 # 假设年 CV 默认值
+        product_cv = product_cv.fillna(default_cv)
+    product_std = product_cv * product_mean
+    part_mean = bom.dot(product_mean)
+    part_var = bom.pow(2).dot(product_std.pow(2))
+    part_std = np.sqrt(part_var)
+    part_robust = np.ceil(part_mean + z * part_std) # 年鲁棒需求
+    return pd.DataFrame({'mean': part_mean, 'std': part_std, 'robust': part_robust})
+
+print("Computing robust part yearly...") # <--- 修改了打印
+robust_parts_yearly = compute_robust_part_yearly(bom, product_demand, product_cv, Z_995) # <--- 修改了变量和函数名
+print("Robust part yearly computed.") # <--- 修改了打印
+print(robust_parts_yearly)
+
+# -----------------------------
+# 3. 族内设备覆盖与选型（成本最小、中心内整数化）
+# -----------------------------
+# 映射字母→族
+groups_by_letter = {**{x: 'ABCD' for x in list('ABCD')},
+                    **{x: 'EFG' for x in list('EFG')},
+                    **{x: 'HIJ' for x in list('IJ')},  # I、J
+                    'H': 'H',                          # H 单独成族
+                    **{x: 'KLM' for x in list('KLM')}}
+
+# 各族可选设备与其能覆盖的工序集合
+coverage_options = {
+    'ABCD': {'A': set('A'), 'B': set('B'), 'C': set('C'), 'D': set('D'),
+             'AB': set('AB'), 'AC': set('AC'), 'CD': set('CD'),
+             'ABC': set('ABC'), 'ABCD': set('ABCD')},
+    'EFG':  {'E': set('E'), 'F': set('F'), 'G': set('G'),
+             'EF': set('EF'), 'EG': set('EG'), 'FG': set('FG'),
+             'EFG': set('EFG')},
+    'HIJ':  {'H': set('H'), 'I': set('I'), 'J': set('J'), 'IJ': set('IJ')},
+    'H':    {'H': set('H')},
+    'KLM':  {'K': set('K'), 'L': set('L'), 'M': set('M'),
+             'KL': set('KL'), 'KM': set('KM'), 'LM': set('LM'),
+             'KLM': set('KLM')}
+}
+
+def _pairwise_disjoint(sets):
+    seen = set()
+    for s in sets:
+        if not seen.isdisjoint(s):
+            return False
+        seen |= s
+    return True
+
+def choose_equipment_for_group(required_letters: set,
+                               load_by_letter: dict,
+                               group_name: str) -> dict:
+    """
+    穷举族内设备组合，要求覆盖 required_letters，组合内各设备覆盖字母互不重叠，
+    以避免负荷重复分摊的复杂分配；在此约束下选总购置成本最小的方案。
+    返回 {'equip_plan':{eq:{covered,load_min_per_year,units,cost}}, 'total_cost', 'total_units'}
+    """
+    options = coverage_options['H'] if group_name == 'H' else coverage_options[group_name]
+    eq_types = list(options.keys())
+    best = None
+    best_detail = None
+    for r in range(1, len(eq_types) + 1):
+        for comb in it.combinations(eq_types, r):
+            sets_ = [options[e] & required_letters for e in comb]
+            nonempty = [s for s in sets_ if s]
+            if not nonempty:
+                continue
+            if set().union(*nonempty) != required_letters:
+                continue
+            if not _pairwise_disjoint(nonempty):
+                continue
+            total_cost = 0
+            total_units = 0
+            detail = {}
+            for e, S in zip(comb, nonempty):
+                load = sum(load_by_letter[L] for L in S) # 年负荷
+                units = max(1, math.ceil(load / EFFECTIVE_MIN_PER_MACHINE_YEARLY)) # <--- 使用年产能
+                cost = units * equipment_df.loc[e, 'Price']
+                total_cost += cost
+                total_units += units
+                detail[e] = {'covered': ''.join(sorted(S)), 'load_min_per_year': load, # <--- 修改了键名
+                             'units': units, 'cost': cost}
+            if (best is None) or (total_cost < best) or (total_cost == best and total_units < best_detail['total_units']):
+                best = total_cost
+                best_detail = {'equip_plan': detail, 'total_cost': total_cost, 'total_units': total_units}
+    return best_detail
+
+def equipment_category(eq: str) -> str:
+    if set(eq) <= set('ABCD'): return 'ABCD'
+    if set(eq) <= set('EFG'):  return 'EFG'
+    if eq in {'H', 'I', 'J', 'IJ'}: return 'HIJ'
+    if set(eq) <= set('KLM'):  return 'KLM'
+    raise ValueError(f'Unknown equipment type: {eq}')
+
+def estimate_center_area(center_plan: dict) -> tuple[int, dict]:
+    total = 0
+    detail = {}
+    for e, info in center_plan.items():
+        cat = equipment_category(e)
+        w, h = envelope_dims_ft[cat]
+        area = w * h
+        qty = info['units']
+        subtotal = qty * area
+        total += subtotal
+        detail[e] = {'category': cat, 'units': qty,
+                     'envelope_ft': f'{w}x{h}',
+                     'area_ft2_per_unit': area,
+                     'subtotal_ft2': subtotal}
+    return total, detail
+
+def build_part_center_plan(part_id: str,
+                           ops_list: list[tuple[str, float]],
+                           robust_yearly_units: float) -> tuple[dict, dict, dict, int, dict]: # <--- 修改了参数名
+    # 计算单件在各字母上的合计工时（考虑同一字母重复工步），再乘鲁棒年需求→年负荷分钟
+    per_unit_time = defaultdict(float)
+    for op, t in ops_list:
+        per_unit_time[op] += t
+    load_by_letter = {op: t * robust_yearly_units for op, t in per_unit_time.items()} # <--- 年负荷
+
+    # 将所需字母按族分组（H 独立）
+    letters = set(per_unit_time.keys())
+    requires = defaultdict(set)
+    for L in letters:
+        g = groups_by_letter[L]
+        if g == 'HIJ' and L == 'H':  # H 独立为 'H'
+            g = 'H'
+        requires[g].add(L)
+
+    # 逐族选型
+    center_plan = {}
+    for group, Ls in requires.items():
+        chosen = choose_equipment_for_group(Ls, load_by_letter, group)
+        if chosen is None:
+            raise RuntimeError(f'Part {part_id}: cannot cover letters {Ls} in group {group}')
+        for e, rec in chosen['equip_plan'].items():
+            if e not in center_plan:
+                center_plan[e] = {'units': 0, 'load_min_per_year': 0.0, 'covered': ''} # <--- 修改了键名
+            center_plan[e]['units'] += rec['units']
+            center_plan[e]['load_min_per_year'] += rec['load_min_per_year'] # <--- 修改了键名
+            center_plan[e]['covered'] += rec['covered']
+
+    # 计算中心内的 C1/C2/C3（小数可在中心内共享 → 向上取整；跨中心不可共享）
+    ops_needed = {'C1': 0.0, 'C2': 0.0, 'C3': 0.0}
+    for e, info in center_plan.items():
+        ops = equipment_df.loc[e, 'Ops']
+        for c in ops_needed:
+            ops_needed[c] += info['units'] * ops[c]
+    # 以“每班”为单位配置，再乘班次数
+    ops_needed = {c: int(math.ceil(v)) * SHIFTS for c, v in ops_needed.items()}
+
+    # 面积估算
+    area_total_ft2, area_detail = estimate_center_area(center_plan)
+    return center_plan, ops_needed, load_by_letter, area_total_ft2, area_detail
+
+# -----------------------------
+# 4. 20 个零件中心：资源与面积汇总 + 网络组织
+# -----------------------------
+centers = {}
+equipment_total = defaultdict(int)
+operators_total = {'C1': 0, 'C2': 0, 'C3': 0}
+area_by_center = {}
+for part in robust_parts_yearly.index: # <--- 修改了变量
+    demand_robust = float(robust_parts_yearly.loc[part, 'robust']) # <--- 修改了变量
+    plan, ops, loads, area_ft2, area_detail = build_part_center_plan(part, part_operations[part], demand_robust)
+    centers[part] = {
+        'robust_yearly_demand': demand_robust, # <--- 修改了键名
+        'equipment_plan': plan,
+        'operators': ops,
+        'area_ft2': area_ft2,
+        'area_detail': area_detail
+    }
+    for e, info in plan.items():
+        equipment_total[e] += info['units']
+    for c in operators_total:
+        operators_total[c] += ops[c]
+    area_by_center[part] = area_ft2
+
+equipment_total = dict(sorted(equipment_total.items(), key=lambda kv: kv[0]))
+area_total_ft2 = int(sum(area_by_center.values()))
+
+# 网络组织：集中 RMC / FGC（中心间无物流）
+def build_network_edges(parts: list[str], centralize_storage: bool = False):
+    edges = []
+    if centralize_storage:
+        for p in parts: edges.append(('RMC', f'Center_{p}'))
+        for p in parts: edges.append((f'Center_{p}', 'FGC'))
+    else:
+        for p in parts:
+            edges.append(('MSC', f'Center_{p}'))
+            edges.append((f'Center_{p}', 'Shipping'))
+    return edges
+
+network_edges = build_network_edges(list(centers.keys()), centralize_storage=True)
+
+# -----------------------------
+# 5. 输出汇总（可按需改为写 CSV/Excel）
+# -----------------------------
+print("="*78)
+print("TASK 3.c — PARTS ORGANIZATION (Steps 1–3) [YEARLY LOGIC]") # <--- 增加了提示
+print("="*78)
+print("\n[Step 1] Network Organization (centralized RMC & FGC; no inter-center logistics)")
+print(f"Nodes: RMC, Centers(P1..P20), FGC  |  Edges count: {len(network_edges)}")
+print("Sample edges:", network_edges[:6], "...", network_edges[-6:])
+
+print("\n[Step 2] Resource Requirements — Overall (equipment units & operators)")
+print("Equipment units (sum across 20 centers):")
+for e, qty in equipment_total.items():
+    print(f"  {e:<4} : {qty:>4d}")
+print("Operators (FTE per shift × SHIFTS; inside each center fractional sharing allowed):")
+print(f"  C1: {operators_total['C1']}  |  C2: {operators_total['C2']}  |  C3: {operators_total['C3']}")
+
+print("\n[Step 3] Center Footprint (spatial envelope-based rough estimate)")
+print(f"Total factory area (centers only, no aisles/corridors/superstructure): {area_total_ft2:,} ft²")
+top5 = sorted(area_by_center.items(), key=lambda kv: kv[1], reverse=True)[:5]
+print("Top-5 largest centers by footprint:", top5)
+
+# 如需查看某个零件中心的详细计划：
+example = 'P1'
+cp = centers[example]['equipment_plan']
+ops = centers[example]['operators']
+print(f"\n[Detail] Center {example} — Robust yearly demand = {centers[example]['robust_yearly_demand']:.0f} units") # <--- 修改了文本
+print("Equipment plan (units / covered operations):")
+for e, info in cp.items():
+    print(f"  {e:<4} : {info['units']:>3d}  | covered: {''.join(sorted(set(info['covered'])))}")
+print(f"Operators → C1:{ops['C1']}  C2:{ops['C2']}  C3:{ops['C3']}")
+print(f"Estimated area: {centers[example]['area_ft2']} ft²")
+
+# 循环遍历 P1 到 P20
+for i in range(1, 21):
+    example = f'P{i}' # 动态创建键名，如 'P1', 'P2', ..., 'P20'
+    
+    # 最好检查一下键是否存在，以防 P1-P20 并不都存在于 centers 字典中
+    if example in centers:
+        cp = centers[example]['equipment_plan']
+        ops = centers[example]['operators']
+        
+        print(f"\n[Detail] Center {example} — Robust yearly demand = {centers[example]['robust_yearly_demand']:.0f} units") # <--- 修改了文本
+        print("Equipment plan (units / covered operations):")
+        for e, info in cp.items():
+            print(f"  {e:<4} : {info['units']:>3d}  | covered: {''.join(sorted(set(info['covered'])))}")
+        print(f"Operators → C1:{ops['C1']}  C2:{ops['C2']}  C3:{ops['C3']}")
+        print(f"Estimated area: {centers[example]['area_ft2']} ft²")
+        print("-" * 30) # 添加一个分隔符，使输出更清晰
+    else:
+        # 如果某个 Pn 不存在，可以选择打印一条消息
+        print(f"\n[Info] Center {example} not found.")
+        print("-" * 30)
+
+# ======================================================================
+# --- STEP 4: Intra-center Work & Flow Patterns and Utilization ---
+# ======================================================================
+
+import math
+import numpy as np
+import pandas as pd
+
+# 4.1 逐中心、逐设备的利用率表（按年）
+def build_utilization_tables(centers_dict: dict,
+                             effective_min_per_machine: float = EFFECTIVE_MIN_PER_MACHINE_YEARLY) -> pd.DataFrame: # <--- 修改了默认值
+    rows = []
+    for cid, cdata in centers_dict.items():
+        for e, info in cdata['equipment_plan'].items():
+            load = info['load_min_per_year']             # 该设备类型在该中心承载的年负荷（分钟） # <--- 修改了键名和注释
+            units = info['units']                       # 台数（向上取整过）
+            cap   = units * effective_min_per_machine   # 年能力（分钟） # <--- 修改了注释
+            util  = load / cap if cap > 0 else np.nan
+            rows.append({
+                'Center': cid,
+                'Equipment': e,
+                'Units': units,
+                'Yearly_Load_min': round(load, 2), # <--- 修改了键名
+                'Yearly_Capacity_min': round(cap, 2), # <--- 修改了键名
+                'Utilization': util
+            })
+    util_df = pd.DataFrame(rows).sort_values(['Center','Equipment']).reset_index(drop=True)
+    return util_df
+
+utilization_df = build_utilization_tables(centers)
+
+# 4.2 生成“中心内部单向流”示意需要的序列（按工艺→族→一次性去重）
+# 用于布局叠加（简图：Inbound → 各族按出现顺序布置 → Outbound）
+def center_flow_sequence(part_id: str) -> list[str]:
+    seq = []
+    for op in routes[part_id]:
+        g = groups_by_letter[op] if not (op in ['I','J'] and groups_by_letter[op]=='HIJ') else 'HIJ'
+        if op == 'H': g = 'H'   # H 独立一族（案例页 7 的示意图），I/J 同属 HIJ。
+        if g not in seq:
+            seq.append(g)
+    return ['RCV'] + seq + ['OUT']
+
+# 4.3 （可选）用 matplotlib 画“中心内部流线叠加”的简图（单向流）
+# 注意：此函数每次只画一个中心；不指定任何配色（满足课堂工具约束）
+def plot_center_flow(part_id: str, savepath: str | None = None):
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    seq = center_flow_sequence(part_id)
+    W = 18  # 每个块的标准宽（ft），高度相对较小即可看出流向
+    H = 10
+    margin = 3
+    width = len(seq)*(W+margin)+margin
+    height = H + 2*margin
+
+    fig = plt.figure(figsize=(max(6, len(seq)*2), 2.6))
+    ax = plt.gca()
+    x = margin
+    centers_boxes = []
+    for s in seq:
+        ax.add_patch(Rectangle((x, margin), W, H, fill=False))
+        ax.text(x+W/2, margin+H/2, s, ha='center', va='center')
+        centers_boxes.append((s, x+W/2, margin+H/2))
+        x += W + margin
+    # 画单向箭头
+    for i in range(len(centers_boxes)-1):
+        x0, y0 = centers_boxes[i][1], centers_boxes[i][2]
+        x1, y1 = centers_boxes[i+1][1], centers_boxes[i+1][2]
+        ax.annotate('', xy=(x1-2, y1), xytext=(x0+2, y0), arrowprops=dict(arrowstyle='->'))
+    ax.set_xlim(0, width)
+    ax.set_ylim(0, height)
+    ax.axis('off')
+    ax.set_title(f'Center {part_id} — One-way Intra-center Flow (schematic)')
+    if savepath:
+        plt.savefig(savepath, bbox_inches='tight', dpi=150)
+    plt.close(fig)
+
+# 使用示例（需要图时再调用；会生成 PNG）：
+# plot_center_flow('P1', savepath='center_P1_flow.png') # 暂时注释掉
+
+# ======================================================================
+# --- STEP 5: Inter-center Flows, Distance Matrix & Traffic (decentralized) ---
+# ======================================================================
+# 我们采用你已切换的“收发存分散到中心”的网络（Dock↔Center:RCV/OUT，外发到 A/B 近端仓）。
+# 需求：From-To 矩阵（内部），Distance 矩阵（内部主通道），总行驶距离与走廊热度图。
+
+# 5.1 依据 BOM 计算每个零件面向 A / B 的年均量占比（用于中心→Dock→A/B 的流向拆分）
+prod_is_A = [c for c in bom.columns if str(c).startswith('A')]
+prod_is_B = [c for c in bom.columns if str(c).startswith('B')]
+part_to_A_share = {}
+part_to_B_share = {}
+for p, row in bom.iterrows():
+    demand_to_A = (row[prod_is_A] * product_demand[prod_is_A]).sum()
+    demand_to_B = (row[prod_is_B] * product_demand[prod_is_B]).sum()
+    tot = demand_to_A + demand_to_B
+    if tot <= 0:
+        part_to_A_share[p] = 0.0
+        part_to_B_share[p] = 0.0
+    else:
+        part_to_A_share[p] = float(demand_to_A / tot)
+        part_to_B_share[p] = float(demand_to_B / tot)
+
+# 5.2 主通道“一字型”简化布局：把 20 个中心沿同一主通道依次排布（仅用于内部里程/热度估算）
+# 宽度估算：把该中心所含设备族的“包络宽”相加（页 7 的族包络）。
+def center_travel_length_ft(center_equipment_plan: dict) -> int:
+    # 该中心出现过的设备族（去重）
+    cats = set()
+    for e in center_equipment_plan.keys():
+        cats.add(equipment_category(e))
+    # 简化为族宽度线性累加（单向流从左到右）
+    return sum(envelope_dims_ft[c][0] for c in sorted(cats))
+
+# 布局坐标（主通道上从 Dock=0 开始逐个中心右排）
+dock_x = 0
+center_pos = {}   # x 坐标（中心几何中心）
+center_span = {}  # 长度（沿通道方向）
+cursor = 50  # dock 与第一个中心留 50 ft 缓冲
+for p in sorted(centers.keys()):
+    L = center_travel_length_ft(centers[p]['equipment_plan'])
+    center_span[p] = L
+    center_pos[p] = cursor + L/2
+    cursor += L + 30   # 中心之间留 30 ft 走廊缓冲
+
+# 5.3 内部 From-To 流矩阵（以“件/年”或“kit/年”为单位）
+N = len(centers)
+nodes = ['Dock'] + [f'Center_{p}:RCV' for p in sorted(centers)] + [f'Center_{p}:OUT' for p in sorted(centers)]
+ft_mat = pd.DataFrame(0.0, index=nodes, columns=nodes)
+
+# inbound：Dock -> Center:RCV ；100 件/kit，按鲁棒年需求折算 kit 数。
+inbound_kits = {}
+for p in sorted(centers):
+    kits = math.ceil(centers[p]['robust_yearly_demand'] / 100.0) # <--- 使用年需求
+    inbound_kits[p] = kits # kits/year
+    ft_mat.loc['Dock', f'Center_{p}:RCV'] = kits
+
+# outbound：Center:OUT -> Dock（成品出厂），以“件/年”为单位；再由 Dock 外发 A/B（外部里程不计入内部交通）
+for p in sorted(centers):
+    ft_mat.loc[f'Center_{p}:OUT', 'Dock'] = centers[p]['robust_yearly_demand'] # <--- 使用年需求
+
+# 5.4 内部 Distance 矩阵（英尺）：采用“Dock 在 0”、RCV/OUT 与中心几何中心等距的近似
+dist_mat = pd.DataFrame(0.0, index=nodes, columns=nodes)
+for p in sorted(centers):
+    x_c = center_pos[p]
+    dist_mat.loc['Dock', f'Center_{p}:RCV'] = abs(x_c - dock_x)
+    dist_mat.loc[f'Center_{p}:OUT', 'Dock'] = abs(x_c - dock_x)
+
+# 5.5 总内部行驶距离（按件*英尺/年；入厂按 kit*英尺/年）
+total_internal_travel_ft = float((ft_mat * dist_mat).to_numpy().sum())
+
+# 5.6 主通道“热度”剖面（每个通道段的总流量，年维度）
+# 简化：把 Dock→Center 的 inbound kit 与 Center→Dock 的 outbound 件，都叠加到 Dock..Center_pos 的通道线上
+# 分辨率：每 25 ft 一个段
+segment = 25.0
+max_x = max(center_pos.values()) + 50
+num_seg = int(math.ceil(max_x/segment))
+heat = np.zeros(num_seg)
+def add_flow_segment(x0, x1, qty):
+    if x1 < x0:
+        x0, x1 = x1, x0
+    i0, i1 = int(x0//segment), int(x1//segment)
+    for i in range(i0, i1+1):
+        heat[i] += qty
+
+for p in sorted(centers):
+    x_c = center_pos[p]
+    add_flow_segment(dock_x, x_c, inbound_kits[p])                      # kits/年
+    add_flow_segment(x_c, dock_x, centers[p]['robust_yearly_demand'])   # 件/年
+
+# 5.7 （可选）绘制热度图（1×N 栅格）与流程图
+def plot_aisle_heatmap(heat_array: np.ndarray, seg_len_ft: float = segment, savepath: str | None = None):
+    import matplotlib.pyplot as plt
+    arr = heat_array.reshape(1, -1)
+    fig = plt.figure(figsize=(max(6, arr.shape[1]*0.3), 1.8))
+    ax = plt.gca()
+    im = ax.imshow(arr, aspect='auto')
+    ax.set_xlabel('Main aisle segments (each ~{} ft)'.format(int(seg_len_ft)))
+    ax.set_yticks([])
+    ax.set_title('Internal Traffic Heat (kits & parts per year)') # <--- 修改了标题
+    if savepath:
+        plt.savefig(savepath, bbox_inches='tight', dpi=150)
+    plt.close(fig)
+
+# 使用示例：
+# plot_aisle_heatmap(heat, savepath='factory_aisle_heat.png') # 暂时注释掉
+
+# ======================================================================
+# --- STEP 6: Key Performance Indicators (KPIs) ---
+# ======================================================================
+
+# 6.1 面积
+kpi_total_area_ft2 = area_total_ft2  # 已在前面求得（仅生产中心，未含通道与结构）
+# 6.2 平均设备利用率（单位层面，基于年负荷/年产能）
+utilization_df['Utilization_pct'] = (utilization_df['Utilization']*100).round(1)
+kpi_avg_util_overall = float(utilization_df['Utilization'].mean())
+kpi_median_util_overall = float(utilization_df['Utilization'].median())
+
+# 6.3 各零件的“理论加工周期时间”（不含等待，分钟）与“有效周期时间”（简单校正 /OEE）
+per_part_CT_min = {}
+for p, ops in part_operations.items():
+    raw = sum(t for _, t in ops)                # ∑工序时间（min/unit）——案例页 5。
+    per_part_CT_min[p] = {'CT_theoretical_min': raw, 'CT_effective_min': raw / OEE}
+
+# 6.4 吞吐与 WIP（按 Little 定律，简化估计）
+HOURS_PER_WEEK = 8 * SHIFTS * 5
+HOURS_PER_YEAR = HOURS_PER_WEEK * Yearly_weeks # <--- 新增年小时
+kpi_rows = []
+for p in sorted(centers):
+    thru_rate_uph = centers[p]['robust_yearly_demand'] / HOURS_PER_YEAR  # units/hour (年需求/年小时) # <--- 修改了计算
+    ct_hr = per_part_CT_min[p]['CT_effective_min'] / 60.0
+    wip = thru_rate_uph * ct_hr                                           # units
+    kpi_rows.append({
+        'Center': p,
+        'Throughput_uph': round(thru_rate_uph, 3),
+        'CT_effective_hr': round(ct_hr, 3),
+        'WIP_units_est': round(wip, 2)
+    })
+kpi_wip_df = pd.DataFrame(kpi_rows)
+
+# 6.5 能力/服务水平可达性（所有设备利用率 <= 100% 视为“容量满足鲁棒需求”）
+kpi_capacity_ok = bool((utilization_df['Utilization'] <= 1.0 + 1e-9).all())
+
+# 6.6 总内部行驶距离（from step 5）
+kpi_total_internal_travel_ft = total_internal_travel_ft
+
+print("\n[KPIs]")
+print(f"Total center area (no corridors): {kpi_total_area_ft2:,} ft²")
+print(f"Equipment utilization (yearly) — mean: {kpi_avg_util_overall:.2%} | median: {kpi_median_util_overall:.2%}") # <--- 增加了(yearly)
+print(f"Capacity suffices for robust demand? {'YES' if kpi_capacity_ok else 'NO'}")
+print(f"Total internal travel distance (yearly): {kpi_total_internal_travel_ft:,.0f} ft") # <--- 修改了(weekly)
+print("Sample WIP per center (first 5 rows):")
+print(kpi_wip_df.head().to_string(index=False))
+
+# ======================================================================
+# --- STEP 7: CAPEX & OPEX ---
+# ======================================================================
+# 参数与依据：
+# • 设备购置价、寿命：见设备表（页 6）；建筑成本：250 $/ft²（页 7）；财务费率 10%（页 7）；
+# • 近客户仓若使用：200 $/ft²、内部可用净高 20 ft（页 8）；C1/C2/C3 时薪：$40/$75/$100（页 6）。
+
+# 7.1 物料单价/几何数据（页 4）用于估算仓库体量和材料成本
+part_specs = {
+    'P1':  {'X':2,'Y':6,'Z':6,'Price':12},   'P2': {'X':8,'Y':8,'Z':4,'Price':100},
+    'P3':  {'X':6,'Y':6,'Z':6,'Price':50},   'P4': {'X':12,'Y':6,'Z':4,'Price':120},
+    'P5':  {'X':8,'Y':4,'Z':6,'Price':50},   'P6': {'X':2,'Y':8,'Z':6,'Price':15},
+    'P7':  {'X':2,'Y':2,'Z':12,'Price':25},  'P8': {'X':4,'Y':4,'Z':4,'Price':20},
+    'P9':  {'X':2,'Y':4,'Z':12,'Price':40},  'P10':{'X':4,'Y':4,'Z':4,'Price':20},
+    'P11': {'X':4,'Y':6,'Z':4,'Price':30},   'P12':{'X':6,'Y':6,'Z':4,'Price':30},
+    'P13': {'X':2,'Y':2,'Z':12,'Price':25},  'P14':{'X':2,'Y':4,'Z':6,'Price':20},
+    'P15': {'X':4,'Y':6,'Z':4,'Price':25},   'P16':{'X':4,'Y':4,'Z':4,'Price':20},
+    'P17': {'X':12,'Y':2,'Z':2,'Price':80},  'P18':{'X':12,'Y':2,'Z':2,'Price':80},
+    'P19': {'X':12,'Y':2,'Z':2,'Price':80},  'P20':{'X':12,'Y':2,'Z':2,'Price':80},
+}
+# 注：表格“Price/unit”在本步骤按“材料成本”使用（用于库存价值与材料直采成本）。
+
+# 7.2 设备 CAPEX（购置）
+capex_equip = 0
+for e, qty in equipment_total.items():
+    capex_equip += qty * equipment_df.loc[e,'Price']
+
+# 7.3 工厂建筑 CAPEX（仅中心占地；未计通道/结构）与可选通道系数
+AISLE_FACTOR = 1.25  # 把通道、边界等附加面积折算（可调）
+factory_area_with_aisles = area_total_ft2 * AISLE_FACTOR
+capex_factory_building = factory_area_with_aisles * 250   # 250 $/ft²（页 7）。
+
+# 7.4 仓库（近客户 A/B）面积与 CAPEX（若使用）
+# 客户 A/B 在其侧需维持 99% autonomy 的 4 小时与 12 小时缓冲（页 3）。我们若运营近端仓，则至少要容纳这部分量。
+WH_HEIGHT_FT = 20
+STORAGE_UTIL = 0.5  # 立方利用率（通道、货架空隙等）
+def wh_buffer_area_sqft_for(client: str) -> float:
+    assert client in ('A','B')
+    hours = 4 if client=='A' else 12
+    total_cuft = 0.0
+    for p in sorted(centers):
+        # 该零件分配到该客户的年均比例（基于 BOM×产品年均）：
+        share = part_to_A_share[p] if client=='A' else part_to_B_share[p]
+        mean_yearly_p = robust_parts_yearly.loc[p,'mean']  # 用年均分配缓冲（更贴近实际消耗节拍）。 # <--- 修改了变量
+        uph = mean_yearly_p / (HOURS_PER_WEEK * Yearly_weeks) # <--- 修改了计算 UPH 的方式
+        units = uph * hours
+        spec = part_specs[p]
+        vol_cuin = spec['X'] * spec['Y'] * spec['Z']
+        vol_cuft = vol_cuin / 1728.0
+        total_cuft += units * vol_cuft
+    area = total_cuft / (WH_HEIGHT_FT * STORAGE_UTIL)  # ft²
+    return area
+
+wh_area_A = wh_buffer_area_sqft_for('A')
+wh_area_B = wh_buffer_area_sqft_for('B')
+capex_wh_A = wh_area_A * 200  # 200 $/ft²（页 8）。
+capex_wh_B = wh_area_B * 200  # 200 $/ft²（页 8）。
+
+# 7.5 物料搬运与货架 CAPEX（占位参数；如你有报价可直接替换）
+capex_handling_equip = 0.0     # 例如叉车、拖车等；默认先置 0，由你填入报价
+capex_racking_factory  = 0.0   # 若中心内需要专用货架，可在此估算
+capex_racking_wh       = 0.0   # 近端仓货架成本，可按 $/ft² 简算
+
+capex_total = capex_equip + capex_factory_building + capex_wh_A + capex_wh_B + capex_handling_equip + capex_racking_factory + capex_racking_wh
+
+# 7.6 OPEX（周）：人工 + 物料搬运 + 库存资金占用 + 材料成本
+# 人工时薪（页 6）：C1=$40、C2=$75、C3=$100。
+LABOR_RATE = {'C1':40, 'C2':75, 'C3':100}
+weekly_hours = 8 * 5     # 每位员工每周工作时长（不含 49 周/年的年化，这里按周成本）
+weekly_labor_cost = sum(operators_total[c] * LABOR_RATE[c] * weekly_hours for c in LABOR_RATE)
+
+# 搬运：去中心化时，中心内搬运由设备操作员完成（页 7），故外部“handlers”=0；若你仍配置搬运员，可在此添加。
+weekly_handlers_cost = 0.0
+
+# 库存资金占用：年化 10%（页 7）。原材料：两周鲁棒库存（页 4）；成品：近端仓缓冲（A 4h，B 12h）。
+ANNUAL_FIN_RATE = 0.10
+def raw_material_inventory_value_2w() -> float:
+    val = 0.0
+    for p in sorted(centers):
+        units_2w = 2 * (robust_parts_yearly.loc[p,'robust'] / Yearly_weeks)     # 2周鲁棒（年鲁棒 / 52 * 2） # <--- 修改了计算
+        val += units_2w * part_specs[p]['Price']
+    return val
+
+def fg_inventory_value_near_client() -> float:
+    # 用 wh_area_A/B 对应的体积 * 单位价值的方式较复杂，改用按缓冲件数×价钱计算（与 7.4 对齐）
+    valA = valB = 0.0
+    for p in sorted(centers):
+        uphA = (robust_parts_yearly.loc[p,'mean'] * part_to_A_share[p]) / (HOURS_PER_WEEK * Yearly_weeks) # <--- 修改了计算
+        uphB = (robust_parts_yearly.loc[p,'mean'] * part_to_B_share[p]) / (HOURS_PER_WEEK * Yearly_weeks) # <--- 修改了计算
+        unitsA = uphA * 4
+        unitsB = uphB * 12
+        valA += unitsA * part_specs[p]['Price']
+        valB += unitsB * part_specs[p]['Price']
+    return valA + valB
+
+inv_value_raw = raw_material_inventory_value_2w()
+inv_value_fg  = fg_inventory_value_near_client()
+weekly_financing_cost = (inv_value_raw + inv_value_fg) * (ANNUAL_FIN_RATE/52)
+
+# 材料直接成本（按鲁棒年需求 / 52 × Price/unit）
+weekly_materials_cost = 0.0
+for p in sorted(centers):
+    weekly_materials_cost += (centers[p]['robust_yearly_demand'] / Yearly_weeks) * part_specs[p]['Price'] # <--- 修改了计算
+
+weekly_opex_total = weekly_labor_cost + weekly_handlers_cost + weekly_financing_cost + weekly_materials_cost
+
+# ---------------- 输出汇总 ----------------
+print("\n[CAPEX]")
+print(f"Equipment purchase: ${capex_equip:,.0f}")
+print(f"Factory building (@250$/ft², with aisles factor {AISLE_FACTOR}): ${capex_factory_building:,.0f} | area ~ {factory_area_with_aisles:,.0f} ft²")
+print(f"Near-client A warehouse (@200$/ft²): ${capex_wh_A:,.0f} | area ~ {wh_area_A:,.0f} ft²")
+print(f"Near-client B warehouse (@200$/ft²): ${capex_wh_B:,.0f} | area ~ {wh_area_B:,.0f} ft²")
+print(f"Handling & racking (factory+warehouses): ${capex_handling_equip + capex_racking_factory + capex_racking_wh:,.0f}")
+print(f"TOTAL CAPEX: ${capex_total:,.0f}")
+
+print("\n[OPEX — weekly (based on yearly plan)]") # <--- 增加了提示
+print(f"Direct labor: ${weekly_labor_cost:,.0f}  (C1/C2/C3 rates per casebook)")
+print(f"Handlers: ${weekly_handlers_cost:,.0f}  (decentralized → 0 unless you add handlers)")
+print(f"Inventory financing (10%/yr): ${weekly_financing_cost:,.0f}  (raw 2-week robust + near-client buffers)")
+print(f"Materials: ${weekly_materials_cost:,.0f}")
+print(f"TOTAL OPEX / week: ${weekly_opex_total:,.0f}")
+
+
+# =========================
+# --- Center 机器汇总表 ---
+# =========================
+from collections import defaultdict
+
+def center_equipment_summary(centers_dict: dict,
+                             eff_cap_per_machine: float = EFFECTIVE_MIN_PER_MACHINE_YEARLY,
+                             export_path_csv: str | None = "center_equipment_summary.csv",
+                             export_path_xlsx: str | None = "center_equipment_summary.xlsx"):
+    """
+    生成两个DataFrame：
+      1) detail_df: 逐 center、逐设备 的明细（台数/负荷/产能/利用率/覆盖字母）
+      2) totals_df: 逐 center 的小计（总台数、总负荷、总产能、加权平均利用率、C1/C2/C3、估算面积）
+    同时可选导出 CSV 与 Excel（Excel 多sheet，包含明细与小计）。
+    """
+    detail_rows = []
+    total_rows  = []
+
+    for cid, cdata in sorted(centers_dict.items(), key=lambda kv: kv[0]):
+        equip_plan = cdata['equipment_plan']
+        ops        = cdata.get('operators', {'C1':0,'C2':0,'C3':0})
+        area_ft2   = cdata.get('area_ft2', None)
+
+        # 明细
+        for e, info in sorted(equip_plan.items(), key=lambda kv: kv[0]):
+            units = int(info['units'])
+            load  = float(info['load_min_per_year'])
+            cap   = units * eff_cap_per_machine
+            util  = (load / cap) if cap > 0 else float('nan')
+            covered_letters = ''.join(sorted(set(info.get('covered',''))))
+            detail_rows.append({
+                'Center'              : cid,
+                'Equipment'           : e,
+                'Units'               : units,
+                'Yearly_Load_min'     : round(load, 2),
+                'Yearly_Capacity_min' : round(cap, 2),
+                'Utilization'         : util,
+                'Utilization_%'       : round(util*100, 1) if util==util else None,
+                'Covered_Letters'     : covered_letters
+            })
+
+        # 小计（center 级）
+        # 计算总台数/总负荷/总产能与加权平均利用率（按产能加权，更稳健）
+        total_units = sum(int(info['units']) for info in equip_plan.values())
+        total_load  = sum(float(info['load_min_per_year']) for info in equip_plan.values())
+        total_cap   = sum(int(info['units']) * eff_cap_per_machine for info in equip_plan.values())
+        util_wt     = (total_load / total_cap) if total_cap > 0 else float('nan')
+
+        total_rows.append({
+            'Center'              : cid,
+            'Total_Units'         : int(total_units),
+            'Total_Yearly_Load_min'    : round(total_load, 2),
+            'Total_Yearly_Capacity_min': round(total_cap, 2),
+            'Utilization_weighted'     : util_wt,
+            'Utilization_weighted_%'   : round(util_wt*100, 1) if util_wt==util_wt else None,
+            'C1'                  : int(ops.get('C1',0)),
+            'C2'                  : int(ops.get('C2',0)),
+            'C3'                  : int(ops.get('C3',0)),
+            'Area_ft2'            : area_ft2
+        })
+
+    detail_df = pd.DataFrame(detail_rows).sort_values(['Center','Equipment']).reset_index(drop=True)
+    totals_df = pd.DataFrame(total_rows).sort_values(['Center']).reset_index(drop=True)
+
+    # 可选导出
+    if export_path_csv:
+        detail_df.to_csv(export_path_csv, index=False)
+
+    if export_path_xlsx:
+        with pd.ExcelWriter(export_path_xlsx, engine='xlsxwriter') as writer:
+            detail_df.to_excel(writer, sheet_name='Detail', index=False)
+            totals_df.to_excel(writer, sheet_name='Center_Totals', index=False)
+
+    return detail_df, totals_df
+
+# === 运行并展示前5行 ===
+detail_df, totals_df = center_equipment_summary(centers)
+print("\n[Center Equipment — DETAIL] (head)")
+print(detail_df.head(12).to_string(index=False))
+print("\n[Center Equipment — TOTALS]")
+print(totals_df.to_string(index=False))
