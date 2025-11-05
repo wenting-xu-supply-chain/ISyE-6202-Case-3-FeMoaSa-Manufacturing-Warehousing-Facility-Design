@@ -115,7 +115,7 @@ def annual_holding_cost(avg_on_hand_units, unit_value, rate=HOLDING_RATE):
 
 # ---------------- Data prep (reuse Task 1 or reload) ----------------
 if 'excel_path' not in globals():
-    excel_path = "iSYE+6202+%26+6335+2025+Casework+3+FaMoaSa++Facility+Design+-+Tables+and+Basic+Layouts.xlsx"
+    excel_path = "iSYE 6202 & 6335 2025 Casework 3 FaMoaSa Facility Design - Tables and Basic Layouts.xlsx"
 
 if 'parts_bom_df' not in globals() or 'product_demand_avg' not in globals():
     parts_df_raw_t2 = pd.read_excel(excel_path, sheet_name="+1 Year Parts per Product", header=9)
