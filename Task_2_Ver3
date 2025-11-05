@@ -4,6 +4,7 @@
 # - Prefer DIRECT when cheaper (tie-break to DIRECT)
 # - Zero inventory => zero slots/area/cost
 # - Report utilization (per-part & node)
+# - Uses real per-part dimensions & unit values from the case table
 # ============================================================
 
 import math
@@ -49,10 +50,6 @@ SD_factory_to_B_line_direct = 0.55
 # Handling means (hours)
 LT_factory_outbound_handling_mean = 0.2
 LT_wh_handling_mean = 0.25
-
-# Part master defaults (replace with your real dims/values if available)
-DEFAULT_PART_DIM_IN = (10.0, 6.0, 4.0)
-DEFAULT_PART_VALUE = 25.0
 
 # Numerical thresholds
 EPS = 1e-9               # generic epsilon
@@ -138,20 +135,40 @@ if 'parts_bom_df' not in globals() or 'product_demand_avg' not in globals():
     product_demand_avg = demand_df_clean_t2.iloc[0][['A1','A2','A3','B1','B2']].astype(float)
     print("Task 2: reloaded parts_bom_df & product_demand_avg from Excel (fallback).")
 
-# Simple part master (replace with your real dimensions/values)
+# ---- Real per-part dimensions (inches) and unit values ($) from the case table ----
+# X→L_in, Y→W_in, Z→H_in (all in inches); Unit_Value_USD from 'Price/unit'
+part_data = {
+    "P1":  (2, 6, 6, 12),
+    "P2":  (8, 8, 4, 100),
+    "P3":  (6, 6, 6, 50),
+    "P4":  (12, 6, 4, 120),
+    "P5":  (8, 4, 6, 50),
+    "P6":  (2, 8, 6, 15),
+    "P7":  (2, 2, 12, 25),
+    "P8":  (4, 4, 4, 20),
+    "P9":  (2, 4, 12, 40),
+    "P10": (4, 4, 4, 20),
+    "P11": (4, 6, 4, 30),
+    "P12": (6, 6, 4, 30),
+    "P13": (2, 2, 12, 25),
+    "P14": (2, 4, 6, 20),
+    "P15": (4, 6, 4, 25),
+    "P16": (4, 4, 4, 20),
+    "P17": (12, 2, 2, 80),
+    "P18": (12, 2, 2, 80),
+    "P19": (12, 2, 2, 80),
+    "P20": (12, 2, 2, 80),
+}
+
+# Build part_master from real data
 part_ids = parts_bom_df.index.tolist()
-part_master = pd.DataFrame({
-    'Part': part_ids,
-    'L_in': DEFAULT_PART_DIM_IN[0],
-    'W_in': DEFAULT_PART_DIM_IN[1],
-    'H_in': DEFAULT_PART_DIM_IN[2],
-    'Unit_Value_USD': DEFAULT_PART_VALUE
-}).set_index('Part')
-
-# If you have real data:
-# real = pd.read_excel(excel_path, sheet_name="Part Materials", header=??)[['Part','L','W','H','Value']]
-# part_master.update(real.set_index('Part'))
-
+part_master = pd.DataFrame(
+    [
+        {"Part": p, "L_in": part_data[p][0], "W_in": part_data[p][1], "H_in": part_data[p][2],
+         "Unit_Value_USD": part_data[p][3]}
+        for p in part_ids
+    ]
+).set_index("Part")
 
 # ---------------- Convert annual → hourly; set CVs ----------------
 parts_annual_demand_A = parts_bom_df[['A1','A2','A3']].dot(product_demand_avg[['A1','A2','A3']])
@@ -380,7 +397,7 @@ os.makedirs(task2_dir, exist_ok=True)
 df_task2.sort_values(["client","part_id"]).to_csv(os.path.join(task2_dir, "Task2_Per_Part_Client_Best_Plan.csv"), index=False)
 df_nodes.to_csv(os.path.join(task2_dir, "Task2_Node_Level_Summary.csv"), index=False)
 
-print("\n✅ Task 2 completed (prefers DIRECT; zero-inventory=zero-area).")
+print("\n✅ Task 2 completed (prefers DIRECT; zero-inventory=zero-area; real per-part sizes & values).")
 print(f"📁 Output directory: {task2_dir}")
 print("\n--- Task2_Per_Part_Client_Best_Plan (preview) ---")
 print(df_task2.head())
