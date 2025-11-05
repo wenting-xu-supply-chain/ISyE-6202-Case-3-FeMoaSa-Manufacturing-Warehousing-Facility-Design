@@ -1,0 +1,388 @@
+# ============================================================
+# Georgia Tech ISyE 6202 & 6335 - Casework 3
+# Task 2: Finished-Goods Inventory & Delivery (Two Routes)
+# - Prefer DIRECT when cheaper (tie-break to DIRECT)
+# - Zero inventory => zero slots/area/cost
+# - Report utilization (per-part & node)
+# ============================================================
+
+import math
+import pandas as pd
+import numpy as np
+from scipy.stats import norm
+import os
+
+# ---------------- Tunables ----------------
+OTIF_TARGET = 0.995
+Z_TASK2 = norm.ppf(OTIF_TARGET)
+HOLDING_RATE = 0.20
+BUILD_COST_PER_FT2 = 200.0
+INTERNAL_HEIGHT_FT = 20.0          # Max usable height (ft)
+VOLUME_UTILIZATION = 0.35           # Volume utilization in slot capacity
+SLOT_FT2 = 13.33                    # Slot footprint (ft^2), 48"x40"
+AISLE_FACTOR = 1.6                  # Aisles/ops multiplier
+ZERO_LT_FOR_AB = False              # If True, last-mile LT = 0 for A/B
+
+REVIEW_PERIOD_HOURS = {"A": 1.0, "B": 4.0}
+
+OPERATING_DAYS_PER_YEAR = 250
+HOURS_PER_DAY = 16
+OPERATING_HOURS_PER_YEAR = OPERATING_DAYS_PER_YEAR * HOURS_PER_DAY
+
+# Transport / handling (means, hours)
+LT_factory_to_A_wh = 2.0
+LT_factory_to_B_wh = 2.5
+LT_wh_to_A_line    = 0.3
+LT_wh_to_B_line    = 0.4
+LT_factory_to_A_line_direct = 2.3
+LT_factory_to_B_line_direct = 2.9
+
+# Std devs (hours)
+SD_factory_to_A_wh = 0.4
+SD_factory_to_B_wh = 0.5
+SD_wh_to_A_line    = 0.10
+SD_wh_to_B_line    = 0.12
+SD_factory_outbound_handling = 0.05
+SD_factory_to_A_line_direct = 0.45
+SD_factory_to_B_line_direct = 0.55
+
+# Handling means (hours)
+LT_factory_outbound_handling_mean = 0.2
+LT_wh_handling_mean = 0.25
+
+# Part master defaults (replace with your real dims/values if available)
+DEFAULT_PART_DIM_IN = (10.0, 6.0, 4.0)
+DEFAULT_PART_VALUE = 25.0
+
+# Numerical thresholds
+EPS = 1e-9               # generic epsilon
+ZERO_INV_THRESHOLD = 1e-6 # treat tiny on-hand as zero
+TIE_TOL = 1e-6           # cost tie tolerance
+
+
+# ---------------- Utilities ----------------
+def inches3_to_ft3(l_in, w_in, h_in):
+    """Convert in^3 to ft^3."""
+    return (l_in * w_in * h_in) / 1728.0
+
+def demand_stats(mu_per_hour, cv, hours):
+    """Return mean and std dev over 'hours' using σ ≈ cv × μ."""
+    mu = mu_per_hour * hours
+    sd = cv * mu
+    return mu, sd
+
+def node_inventory(mu_per_hour, cv, review_hours, leadtime_mean, leadtime_sd, z):
+    """
+    Periodic-review (R,S) approximation:
+    mean_total ≈ μ(review) + μ(LT)
+    safety ≈ z × (cv × mean_total)
+    """
+    mu_review, _ = demand_stats(mu_per_hour, cv, review_hours)
+    mu_lt, _ = demand_stats(mu_per_hour, cv, leadtime_mean)
+    mean_total = mu_review + mu_lt
+    safety = z * (cv * mean_total)
+    return mean_total, safety
+
+def storage_area_and_cost_discrete(qty_units, unit_ft3,
+                                   height_ft=INTERNAL_HEIGHT_FT,
+                                   util=VOLUME_UTILIZATION,
+                                   slot_ft2=SLOT_FT2,
+                                   aisle_factor=AISLE_FACTOR,
+                                   build_cost=BUILD_COST_PER_FT2):
+    """
+    Slot method with zero-inventory fix:
+    - If qty == 0 → slots=0, area=0, build=0, utilization=0
+    - Else → slots = max(1, ceil(total_volume / slot_volume))
+    """
+    total_ft3 = qty_units * unit_ft3
+    slot_volume_ft3 = slot_ft2 * height_ft * util
+
+    if total_ft3 <= 0:
+        slots_needed = 0
+        area_ft2 = 0.0
+        build_cost_total = 0.0
+        achieved_utilization = 0.0
+    else:
+        slots_needed = max(1, math.ceil(total_ft3 / max(1e-9, slot_volume_ft3)))
+        area_ft2 = slots_needed * slot_ft2 * aisle_factor
+        build_cost_total = area_ft2 * build_cost
+        denom = max(1e-9, slots_needed * slot_volume_ft3)
+        achieved_utilization = min(1.0, total_ft3 / denom)
+
+    return total_ft3, area_ft2, build_cost_total, slots_needed, slot_volume_ft3, achieved_utilization
+
+def annual_holding_cost(avg_on_hand_units, unit_value, rate=HOLDING_RATE):
+    """Annual holding cost."""
+    return avg_on_hand_units * unit_value * rate
+
+
+# ---------------- Data prep (reuse Task 1 or reload) ----------------
+if 'excel_path' not in globals():
+    excel_path = "iSYE+6202+%26+6335+2025+Casework+3+FaMoaSa++Facility+Design+-+Tables+and+Basic+Layouts.xlsx"
+
+if 'parts_bom_df' not in globals() or 'product_demand_avg' not in globals():
+    parts_df_raw_t2 = pd.read_excel(excel_path, sheet_name="+1 Year Parts per Product", header=9)
+    parts_df_t2 = parts_df_raw_t2.rename(columns={
+        'Parts per Assembled Product Unit Demanded in Year +1 ': 'A1',
+        'Unnamed: 3': 'A2',
+        'Unnamed: 4': 'A3',
+        'Unnamed: 5': 'B1',
+        'Unnamed: 6': 'B2'
+    })
+    parts_df_t2 = parts_df_t2[['Part', 'A1', 'A2', 'A3', 'B1', 'B2']].dropna(subset=['Part'])
+    parts_bom_df = parts_df_t2.set_index('Part').apply(pd.to_numeric, errors='coerce').fillna(0)
+
+    demand_df_raw_t2 = pd.read_excel(excel_path, sheet_name="+1 Year Product Demand", header=16)
+    demand_df_t2 = demand_df_raw_t2[['Year', 'A1', 'A2', 'A3', 'B1', 'B2']].dropna()
+    demand_df_clean_t2 = demand_df_t2[demand_df_t2['Year'].astype(str).str.startswith('+')].reset_index(drop=True)
+    product_demand_avg = demand_df_clean_t2.iloc[0][['A1','A2','A3','B1','B2']].astype(float)
+    print("Task 2: reloaded parts_bom_df & product_demand_avg from Excel (fallback).")
+
+# Simple part master (replace with your real dimensions/values)
+part_ids = parts_bom_df.index.tolist()
+part_master = pd.DataFrame({
+    'Part': part_ids,
+    'L_in': DEFAULT_PART_DIM_IN[0],
+    'W_in': DEFAULT_PART_DIM_IN[1],
+    'H_in': DEFAULT_PART_DIM_IN[2],
+    'Unit_Value_USD': DEFAULT_PART_VALUE
+}).set_index('Part')
+
+# If you have real data:
+# real = pd.read_excel(excel_path, sheet_name="Part Materials", header=??)[['Part','L','W','H','Value']]
+# part_master.update(real.set_index('Part'))
+
+
+# ---------------- Convert annual → hourly; set CVs ----------------
+parts_annual_demand_A = parts_bom_df[['A1','A2','A3']].dot(product_demand_avg[['A1','A2','A3']])
+parts_annual_demand_B = parts_bom_df[['B1','B2']].dot(product_demand_avg[['B1','B2']])
+
+demand_per_hour_A = (parts_annual_demand_A / OPERATING_HOURS_PER_YEAR).rename("mu_A")
+demand_per_hour_B = (parts_annual_demand_B / OPERATING_HOURS_PER_YEAR).rename("mu_B")
+
+DEFAULT_CV_A = 0.40
+DEFAULT_CV_B = 0.35
+cv_A = pd.Series(DEFAULT_CV_A, index=part_ids, name="cv_A")
+cv_B = pd.Series(DEFAULT_CV_B, index=part_ids, name="cv_B")
+
+
+# ---------------- Route evaluators ----------------
+def eval_route_via_wh(mu, cv, client_id, z):
+    """Factory → Near-client WH → Line."""
+    review_h = REVIEW_PERIOD_HOURS[client_id]
+
+    if ZERO_LT_FOR_AB:
+        lt_last_mean, lt_last_sd = 0.0, 0.0
+    else:
+        if client_id == "A":
+            lt_last_mean = LT_wh_handling_mean + LT_wh_to_A_line
+            lt_last_sd = math.sqrt(0.0**2 + SD_wh_to_A_line**2)
+        else:
+            lt_last_mean = LT_wh_handling_mean + LT_wh_to_B_line
+            lt_last_sd = math.sqrt(0.0**2 + SD_wh_to_B_line**2)
+
+    mean_last, saf_last = node_inventory(mu, cv, review_h, lt_last_mean, lt_last_sd, z)
+    wh_units = mean_last + saf_last
+
+    if client_id == "A":
+        lt_up_mean = LT_factory_outbound_handling_mean + LT_factory_to_A_wh
+        lt_up_sd = math.sqrt(SD_factory_outbound_handling**2 + SD_factory_to_A_wh**2)
+    else:
+        lt_up_mean = LT_factory_outbound_handling_mean + LT_factory_to_B_wh
+        lt_up_sd = math.sqrt(SD_factory_outbound_handling**2 + SD_factory_to_B_wh**2)
+
+    mean_up, saf_up = node_inventory(mu, cv, review_h, lt_up_mean, lt_up_sd, z)
+    factory_units = mean_up + saf_up
+
+    return {
+        "route": "via_wh",
+        "node_wh_units": wh_units,
+        "node_factory_units": factory_units,
+        "node_direct_units": 0.0
+    }
+
+def eval_route_direct(mu, cv, client_id, z):
+    """Factory → Direct → Line."""
+    review_h = REVIEW_PERIOD_HOURS[client_id]
+
+    if ZERO_LT_FOR_AB:
+        lt_last_mean, lt_last_sd = 0.0, 0.0
+    else:
+        if client_id == "A":
+            lt_last_mean = LT_factory_outbound_handling_mean + LT_factory_to_A_line_direct
+            lt_last_sd = math.sqrt(SD_factory_outbound_handling**2 + SD_factory_to_A_line_direct**2)
+        else:
+            lt_last_mean = LT_factory_outbound_handling_mean + LT_factory_to_B_line_direct
+            lt_last_sd = math.sqrt(SD_factory_outbound_handling**2 + SD_factory_to_B_line_direct**2)
+
+    mean_last, saf_last = node_inventory(mu, cv, review_h, lt_last_mean, lt_last_sd, z)
+    factory_units = mean_last + saf_last
+
+    return {
+        "route": "direct",
+        "node_wh_units": 0.0,
+        "node_factory_units": factory_units,
+        "node_direct_units": factory_units
+    }
+
+
+# ---------------- Costing + area with utilization ----------------
+def eval_costs_and_area_for_part(part_id, client_id, route_res):
+    """Convert node on-hand units → volume/slots/area/building/holding + utilization."""
+    L, W, H = part_master.loc[part_id, ['L_in','W_in','H_in']].astype(float)
+    unit_ft3 = inches3_to_ft3(L, W, H)
+    unit_value = float(part_master.loc[part_id, 'Unit_Value_USD'])
+
+    wh_units = 0.0 if route_res["node_wh_units"] < ZERO_INV_THRESHOLD else route_res["node_wh_units"]
+    fa_units = 0.0 if route_res["node_factory_units"] < ZERO_INV_THRESHOLD else route_res["node_factory_units"]
+
+    # WH node
+    (wh_ft3, wh_ft2, wh_build, wh_slots,
+     slot_vol_ft3, wh_util) = storage_area_and_cost_discrete(
+        wh_units, unit_ft3,
+        height_ft=INTERNAL_HEIGHT_FT,
+        util=VOLUME_UTILIZATION,
+        slot_ft2=SLOT_FT2,
+        aisle_factor=AISLE_FACTOR,
+        build_cost=BUILD_COST_PER_FT2
+    )
+    # Factory node
+    (fa_ft3, fa_ft2, fa_build, fa_slots,
+     slot_vol_ft3_fa, fa_util) = storage_area_and_cost_discrete(
+        fa_units, unit_ft3,
+        height_ft=INTERNAL_HEIGHT_FT,
+        util=VOLUME_UTILIZATION,
+        slot_ft2=SLOT_FT2,
+        aisle_factor=AISLE_FACTOR,
+        build_cost=BUILD_COST_PER_FT2
+    )
+
+    wh_hold = annual_holding_cost(wh_units, unit_value, HOLDING_RATE)
+    fa_hold = annual_holding_cost(fa_units, unit_value, HOLDING_RATE)
+    total_cost = wh_build + fa_build + wh_hold + fa_hold
+
+    return {
+        "part_id": part_id, "client": client_id, "route": route_res["route"],
+        "unit_ft3": unit_ft3, "unit_value_usd": unit_value,
+        "wh_units": wh_units, "factory_units": fa_units,
+        "wh_slots": wh_slots, "factory_slots": fa_slots,
+        "slot_volume_ft3": slot_vol_ft3,
+        "wh_utilization": wh_util, "factory_utilization": fa_util,
+        "wh_ft3": wh_ft3, "wh_ft2": wh_ft2, "wh_build_cost": wh_build,
+        "factory_ft3": fa_ft3, "factory_ft2": fa_ft2, "factory_build_cost": fa_build,
+        "wh_holding_cost_yr": wh_hold, "factory_holding_cost_yr": fa_hold,
+        "total_annual_cost": total_cost
+    }
+
+
+# ---------------- Best-route chooser (prefer DIRECT; zero-demand handled) ----------------
+def choose_best(part_id, client_id, mu, cv):
+    via = eval_route_via_wh(mu, cv, client_id, Z_TASK2)
+    dir_ = eval_route_direct(mu, cv, client_id, Z_TASK2)
+    via_c = eval_costs_and_area_for_part(part_id, client_id, via)
+    dir_c = eval_costs_and_area_for_part(part_id, client_id, dir_)
+
+    # If no demand, force no_demand and zero everything
+    if abs(mu) <= EPS:
+        out = dir_c.copy()
+        out.update({
+            "route": "no_demand",
+            "wh_units": 0.0, "factory_units": 0.0,
+            "wh_slots": 0, "factory_slots": 0,
+            "wh_ft3": 0.0, "wh_ft2": 0.0, "wh_build_cost": 0.0,
+            "factory_ft3": 0.0, "factory_ft2": 0.0, "factory_build_cost": 0.0,
+            "wh_holding_cost_yr": 0.0, "factory_holding_cost_yr": 0.0,
+            "wh_utilization": 0.0, "factory_utilization": 0.0,
+            "total_annual_cost": 0.0
+        })
+        return out
+
+    # Prefer DIRECT when cheaper (tie-break to DIRECT)
+    if (dir_c["total_annual_cost"] + TIE_TOL) <= via_c["total_annual_cost"]:
+        return dir_c
+    else:
+        return via_c
+
+
+# ---------------- Run for all parts × clients ----------------
+rows = []
+for pid in part_ids:
+    rows.append( choose_best(pid, "A", float(demand_per_hour_A.loc[pid]), float(cv_A.loc[pid])) )
+    rows.append( choose_best(pid, "B", float(demand_per_hour_B.loc[pid]), float(cv_B.loc[pid])) )
+
+df_task2 = pd.DataFrame(rows)
+
+# ---------------- Node-level summary (with achieved utilization) ----------------
+slot_volume_ft3_global = SLOT_FT2 * INTERNAL_HEIGHT_FT * VOLUME_UTILIZATION
+
+# Factory
+factory_total_volume = df_task2["factory_ft3"].sum()
+factory_total_slots = df_task2["factory_slots"].sum()
+factory_capacity_volume = max(1e-9, factory_total_slots * slot_volume_ft3_global)
+factory_achieved_util = (factory_total_volume / factory_capacity_volume) if factory_total_slots > 0 else 0.0
+
+# WH A
+whA_total_volume = df_task2.loc[df_task2["client"]=="A", "wh_ft3"].sum()
+whA_total_slots = df_task2.loc[df_task2["client"]=="A", "wh_slots"].sum()
+whA_capacity_volume = max(1e-9, whA_total_slots * slot_volume_ft3_global)
+whA_achieved_util = (whA_total_volume / whA_capacity_volume) if whA_total_slots > 0 else 0.0
+
+# WH B
+whB_total_volume = df_task2.loc[df_task2["client"]=="B", "wh_ft3"].sum()
+whB_total_slots = df_task2.loc[df_task2["client"]=="B", "wh_slots"].sum()
+whB_capacity_volume = max(1e-9, whB_total_slots * slot_volume_ft3_global)
+whB_achieved_util = (whB_total_volume / whB_capacity_volume) if whB_total_slots > 0 else 0.0
+
+# Floor area & costs
+sum_factory = df_task2[["factory_ft2","factory_build_cost","factory_holding_cost_yr"]].sum()
+sum_A_wh = df_task2[df_task2["client"]=="A"][["wh_ft2","wh_build_cost","wh_holding_cost_yr"]].sum()
+sum_B_wh = df_task2[df_task2["client"]=="B"][["wh_ft2","wh_build_cost","wh_holding_cost_yr"]].sum()
+
+df_nodes = pd.DataFrame([
+    {
+        "node": "Factory Outbound Storage",
+        "volume_utilization_assumption": VOLUME_UTILIZATION,
+        "achieved_utilization": factory_achieved_util,
+        "area_ft2": sum_factory["factory_ft2"],
+        "build_cost_usd": sum_factory["factory_build_cost"],
+        "holding_cost_yr_usd": sum_factory["factory_holding_cost_yr"],
+        "total_volume_ft3": factory_total_volume,
+        "total_slots": factory_total_slots,
+        "slot_capacity_ft3_per_slot": slot_volume_ft3_global
+    },
+    {
+        "node": "Near-client WH A",
+        "volume_utilization_assumption": VOLUME_UTILIZATION,
+        "achieved_utilization": whA_achieved_util,
+        "area_ft2": sum_A_wh["wh_ft2"],
+        "build_cost_usd": sum_A_wh["wh_build_cost"],
+        "holding_cost_yr_usd": sum_A_wh["wh_holding_cost_yr"],
+        "total_volume_ft3": whA_total_volume,
+        "total_slots": whA_total_slots,
+        "slot_capacity_ft3_per_slot": slot_volume_ft3_global
+    },
+    {
+        "node": "Near-client WH B",
+        "volume_utilization_assumption": VOLUME_UTILIZATION,
+        "achieved_utilization": whB_achieved_util,
+        "area_ft2": sum_B_wh["wh_ft2"],
+        "build_cost_usd": sum_B_wh["wh_build_cost"],
+        "holding_cost_yr_usd": sum_B_wh["wh_holding_cost_yr"],
+        "total_volume_ft3": whB_total_volume,
+        "total_slots": whB_total_slots,
+        "slot_capacity_ft3_per_slot": slot_volume_ft3_global
+    },
+])
+
+# ---------------- Export ----------------
+task2_dir = "Task2_Outcome"
+os.makedirs(task2_dir, exist_ok=True)
+df_task2.sort_values(["client","part_id"]).to_csv(os.path.join(task2_dir, "Task2_Per_Part_Client_Best_Plan.csv"), index=False)
+df_nodes.to_csv(os.path.join(task2_dir, "Task2_Node_Level_Summary.csv"), index=False)
+
+print("\n✅ Task 2 completed (prefers DIRECT; zero-inventory=zero-area).")
+print(f"📁 Output directory: {task2_dir}")
+print("\n--- Task2_Per_Part_Client_Best_Plan (preview) ---")
+print(df_task2.head())
+print("\n--- Task2_Node_Level_Summary ---")
+print(df_nodes)
