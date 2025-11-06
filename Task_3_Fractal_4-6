@@ -1,0 +1,328 @@
+# ============================================================
+# Georgia Tech ISyE 6202 & 6335 - Casework 3
+# Task 3 — Fractal Organization (4 identical centers, NO inter-center flow)
+#
+# UPDATE: Q4_IntraCenter_Utilization.csv now includes hourly columns:
+#   - Hourly_Load_Minutes, Hourly_Capacity_Minutes, Utilization_Hour
+#
+# Outputs tagged by deliverable:
+#   Q4_*  -> Deliverable (4)
+#   Q5_*  -> Deliverable (5)
+#   Q6_*  -> Deliverable (6)
+# Also writes Deliverables_Index.csv
+# ============================================================
+
+import os
+import math
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+from collections import OrderedDict, defaultdict
+
+# -------------------- Paths & constants --------------------
+OUT_DIR = "Task3_Fractal_Outcome_NoInterFlow"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+PATH_TASK1   = "Task1_Full_Capacity_Annual_Weekly_Robust.csv"
+PATH_STEPS   = "Task3_Routing_Steps.csv"                 # optional
+PATH_MINUTES = "Task3_Routing_PerProcess_Minutes.csv"    # optional
+PATH_LAYOUT_IMG = "Screenshot 2025-11-06 at 16.12.00.png"
+
+# 4 identical centers; NO inter-center flows
+N_CENTERS = 4
+PROCESSES = list("ABCDEFGHIJKLM")
+
+# Per-center equipment counts (from single-center counts)
+EQUIP_PER_CENTER = OrderedDict({
+    "A": 4, "B": 11, "C": 3, "D": 15, "E": 7, "F": 8, "G": 3,
+    "H": 11, "I": 10, "J": 17, "K": 3, "L": 11, "M": 17
+})
+
+# Timebase: 2 shifts × 5 days × 8h
+DAYS_PER_WEEK = 5
+HOURS_PER_SHIFT = 8
+SHIFTS = 2
+WEEKLY_MIN_PER_MACHINE = DAYS_PER_WEEK * HOURS_PER_SHIFT * 60 * SHIFTS  # 4800
+HOURS_PER_WEEK = DAYS_PER_WEEK * HOURS_PER_SHIFT * SHIFTS               # 80
+
+# -------------------- Helpers --------------------
+def natural_key(label: str):
+    num = "".join(ch for ch in label if ch.isdigit())
+    return (label.rstrip(num), int(num) if num.isdigit() else math.inf)
+
+def ensure_cols(df, cols):
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"Missing columns {missing}. Got {list(df.columns)}")
+
+def save_index_row(rows, q, path, desc):
+    rows.append({"Deliverable": q, "File": os.path.basename(path), "FullPath": path, "Description": desc})
+
+# -------------------- Load Task 1 --------------------
+if not os.path.exists(PATH_TASK1):
+    raise FileNotFoundError(f"Task1 file not found: {PATH_TASK1}")
+
+df_task1 = pd.read_csv(PATH_TASK1, index_col=0)
+ensure_cols(df_task1, ["Weekly_Robust_Demand_99p5_Units", "Total_Minutes_Per_Unit"])
+
+parts = sorted(df_task1.index.tolist(), key=natural_key)
+s_units_week = df_task1.loc[parts, "Weekly_Robust_Demand_99p5_Units"].astype(float)   # units/week
+s_total_min_per_unit = df_task1.loc[parts, "Total_Minutes_Per_Unit"].astype(float)    # minutes/unit
+
+# -------------------- STEP sequences (edges; repeats allowed) --------------------
+STEP_TABLE_FROM_IMAGE = {
+    "P1":  ["B","A","B","C","D","I","J"],
+    "P2":  ["A","C","D","H","J"],
+    "P3":  ["B","D","C","H","J"],
+    "P4":  ["A","B","D","G","H"],
+    "P5":  ["B","C","D","C","D","H","I","J"],
+    "P6":  ["A","B","C","D","H","I","J"],
+    "P7":  ["E","F","C","D","I","J"],
+    "P8":  ["E","H","J"],
+    "P9":  ["F","G","E","G","I","J"],
+    "P10": ["E","F","I","J"],
+    "P11": ["E","G","E","F","G","I"],
+    "P12": ["E","G","F","G","J"],
+    "P13": ["E","F","G","F","G","H","I"],
+    "P14": ["E","F","G","G","H","H","J"],
+    "P15": ["E","F","G","F","I","J"],
+    "P16": ["F","H","I","J"],
+    "P17": ["K","L","M"],
+    "P18": ["K","L","M","M"],
+    "P19": ["L","M","L","M"],
+    "P20": ["L","K","M"],
+}
+
+if os.path.exists(PATH_STEPS):
+    df_steps = pd.read_csv(PATH_STEPS)
+    ensure_cols(df_steps, ["Part"])
+    step_cols = [c for c in df_steps.columns if c != "Part"]
+    STEP_TABLE_FROM_IMAGE = {}
+    for _, row in df_steps.iterrows():
+        p = row["Part"]
+        seq = []
+        for c in step_cols:
+            val = str(row[c]).strip() if pd.notna(row[c]) else ""
+            if val in PROCESSES:
+                seq.append(val)
+        if seq:
+            STEP_TABLE_FROM_IMAGE[p] = seq
+
+step_seq = {}
+for p in parts:
+    step_seq[p] = STEP_TABLE_FROM_IMAGE.get(p, ["A","B","C","D","H","J","M"])
+
+# Save steps used — Q4
+q4_steps = os.path.join(OUT_DIR, "Q4_Steps_Used.csv")
+pd.DataFrame(
+    [{"Part": p, **{f"Step{i+1}": s for i, s in enumerate(step_seq[p])}} for p in parts]
+).to_csv(q4_steps, index=False)
+
+# -------------------- Per-process minutes (utilization math) --------------------
+if os.path.exists(PATH_MINUTES):
+    df_minutes = pd.read_csv(PATH_MINUTES)
+    ensure_cols(df_minutes, ["Part", "Process", "MinutesPerUnit"])
+    df_minutes = df_minutes[df_minutes["Process"].isin(PROCESSES)]
+    df_minutes = df_minutes[df_minutes["Part"].isin(parts)].copy()
+else:
+    rows = []
+    for p in parts:
+        total_min = float(s_total_min_per_unit.loc[p])
+        visited = [x for x in PROCESSES if x in step_seq[p]]
+        if not visited:
+            continue
+        w = np.array([EQUIP_PER_CENTER[x] for x in visited], dtype=float)
+        if w.sum() <= 0: w = np.ones_like(w)
+        alloc = (w / w.sum()) * total_min
+        for proc, minutes in zip(visited, alloc):
+            rows.append({"Part": p, "Process": proc, "MinutesPerUnit": float(minutes)})
+    df_minutes = pd.DataFrame(rows)
+
+pivot_minutes = (
+    df_minutes
+    .pivot_table(index="Part", columns="Process", values="MinutesPerUnit", aggfunc="sum")
+    .reindex(index=parts, columns=PROCESSES)
+    .fillna(0.0)
+)
+
+# -------------------- Intra-center minutes & utilization (Q4) --------------------
+net_min_week = pivot_minutes.mul(s_units_week, axis=0)             # min/week per part×process
+proc_net_minutes_total  = net_min_week.sum(axis=0)                  # min/week per process (all parts)
+proc_net_minutes_center = proc_net_minutes_total / N_CENTERS        # min/week per process per center
+
+equip_counts = pd.Series(EQUIP_PER_CENTER)
+weekly_capacity_minutes_per_process_per_center = equip_counts * WEEKLY_MIN_PER_MACHINE
+
+# NEW: hourly metrics
+proc_net_minutes_center_hour   = proc_net_minutes_center / HOURS_PER_WEEK
+hourly_capacity_minutes_center = weekly_capacity_minutes_per_process_per_center / HOURS_PER_WEEK
+
+utilization_per_process_week = (
+    proc_net_minutes_center / weekly_capacity_minutes_per_process_per_center
+).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+utilization_per_process_hour = (
+    proc_net_minutes_center_hour / hourly_capacity_minutes_center
+).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+rows_util = []
+for c in range(1, N_CENTERS + 1):
+    for proc in PROCESSES:
+        rows_util.append({
+            "Center": f"C{c}",
+            "Process": proc,
+            "Equip_Count": int(EQUIP_PER_CENTER[proc]),
+            # Weekly view
+            "Weekly_Load_Minutes": float(proc_net_minutes_center.loc[proc]),
+            "Weekly_Capacity_Minutes": float(weekly_capacity_minutes_per_process_per_center.loc[proc]),
+            "Utilization_Week": float(utilization_per_process_week.loc[proc]),
+            # Hourly view (NEW)
+            "Hourly_Load_Minutes": float(proc_net_minutes_center_hour.loc[proc]),
+            "Hourly_Capacity_Minutes": float(hourly_capacity_minutes_center.loc[proc]),
+            "Utilization_Hour": float(utilization_per_process_hour.loc[proc]),
+        })
+
+q4_util = os.path.join(OUT_DIR, "Q4_IntraCenter_Utilization.csv")
+pd.DataFrame(rows_util).to_csv(q4_util, index=False)
+
+# -------------------- Intra-center edge flows (week & hour per center) — Q4 --------------------
+edge_flow_week = defaultdict(float)  # units/week per center
+for p in parts:
+    seq = step_seq[p]
+    units_week = float(s_units_week.loc[p]) / N_CENTERS
+    for u, v in zip(seq[:-1], seq[1:]):
+        if (u in PROCESSES) and (v in PROCESSES):
+            edge_flow_week[(u, v)] += units_week
+
+edge_records = []
+for (a, b), flow_wk in edge_flow_week.items():
+    flow_hr = flow_wk / HOURS_PER_WEEK
+    edge_records.append({
+        "From": a,
+        "To": b,
+        "Flow_Units_per_Week_per_Center": float(flow_wk),
+        "Flow_Units_per_Hour_per_Center": float(flow_hr)
+    })
+
+q4_edges_one = os.path.join(OUT_DIR, "Q4_IntraCenter_Process_Edges_Flow_perCenter.csv")
+pd.DataFrame(edge_records).sort_values(["From", "To"]).reset_index(drop=True).to_csv(q4_edges_one, index=False)
+
+rows_edges_all = []
+for c in range(1, N_CENTERS + 1):
+    for rec in edge_records:
+        rows_edges_all.append({
+            "Center": f"C{c}",
+            "From": rec["From"],
+            "To": rec["To"],
+            "Flow_Units_per_Week": rec["Flow_Units_per_Week_per_Center"],
+            "Flow_Units_per_Hour": rec["Flow_Units_per_Hour_per_Center"]
+        })
+q4_edges_all = os.path.join(OUT_DIR, "Q4_IntraCenter_Process_Edges_Flow_AllCenters.csv")
+pd.DataFrame(rows_edges_all).sort_values(["Center", "From", "To"]).reset_index(drop=True).to_csv(q4_edges_all, index=False)
+
+# Schematic graph — Q4
+fig = plt.figure(figsize=(10, 6))
+for i, proc in enumerate(PROCESSES):
+    plt.text(i, 0, proc, ha="center", va="center")
+for (a, b), flow_wk in edge_flow_week.items():
+    i = PROCESSES.index(a); j = PROCESSES.index(b)
+    plt.arrow(i, 0.05, (j - i)*0.9, 0, head_width=0.05, head_length=0.1, length_includes_head=True)
+plt.title("Intra-Center Process Flow (per center) — Schematic")
+plt.axis("off")
+q4_graph = os.path.join(OUT_DIR, "Q4_IntraCenter_Process_Graph.png")
+plt.savefig(q4_graph, bbox_inches="tight"); plt.close()
+
+# Layout overlay — Q4
+if os.path.exists(PATH_LAYOUT_IMG):
+    img = mpimg.imread(PATH_LAYOUT_IMG)
+    h, w = img.shape[0], img.shape[1]
+    PROCESS_ANCHORS = {
+        "A": (0.12, 0.28), "B": (0.22, 0.28), "C": (0.33, 0.36),
+        "D": (0.18, 0.40), "E": (0.12, 0.58), "F": (0.22, 0.66),
+        "G": (0.28, 0.54), "H": (0.48, 0.45), "I": (0.45, 0.72),
+        "J": (0.70, 0.45), "K": (0.92, 0.38), "L": (0.92, 0.53), "M": (0.92, 0.70),
+    }
+    def rel_to_px(x_rel, y_rel): return x_rel * w, y_rel * h
+    fig = plt.figure(figsize=(12, 7)); plt.imshow(img); plt.axis("off")
+    plt.title("Center Layout — Process Flows (x/wk | y/hr per center)")
+    for proc, (xr, yr) in PROCESS_ANCHORS.items():
+        x, y = rel_to_px(xr, yr); plt.text(x, y, proc, ha="center", va="center")
+    for (u, v), flow_wk in edge_flow_week.items():
+        flow_hr = flow_wk / HOURS_PER_WEEK
+        if flow_wk <= 0 or (u not in PROCESS_ANCHORS) or (v not in PROCESS_ANCHORS): continue
+        x1, y1 = rel_to_px(*PROCESS_ANCHORS[u]); x2, y2 = rel_to_px(*PROCESS_ANCHORS[v])
+        dx, dy = x2 - x1, y2 - y1
+        lw = max(1.0, min(6.0, 0.5 + 0.02 * float(flow_wk)))
+        plt.arrow(x1, y1, dx, dy, length_includes_head=True, head_width=12, head_length=18, linewidth=lw)
+        lx, ly = x1 + 0.6*dx, y1 + 0.6*dy
+        plt.text(lx, ly, f"{flow_wk:.1f}/wk | {flow_hr:.2f}/hr", ha="center", va="center")
+    q4_overlay = os.path.join(OUT_DIR, "Q4_Center_Layout_Overlay_Flows_Week_Hour.png")
+    plt.savefig(q4_overlay, bbox_inches="tight", dpi=200); plt.close()
+else:
+    q4_overlay = ""
+
+# -------------------- Inter-center (ZERO) + Heatmaps — Q5 --------------------
+centers = [f"C{i}" for i in range(1, N_CENTERS + 1)]
+inter_flow_mat     = pd.DataFrame(0.0, index=centers, columns=centers)
+inter_distance_mat = pd.DataFrame(0.0, index=centers, columns=centers)
+inter_traffic_mat  = pd.DataFrame(0.0, index=centers, columns=centers)
+
+q5_flow_csv   = os.path.join(OUT_DIR, "Q5_InterCenter_Flow_UnitsPerWeek_ZERO.csv")
+q5_dist_csv   = os.path.join(OUT_DIR, "Q5_InterCenter_Distances_m_ZERO.csv")
+q5_traffic_csv= os.path.join(OUT_DIR, "Q5_InterCenter_Traffic_UnitsMetersPerWeek_ZERO.csv")
+inter_flow_mat.to_csv(q5_flow_csv); inter_distance_mat.to_csv(q5_dist_csv); inter_traffic_mat.to_csv(q5_traffic_csv)
+
+fig = plt.figure(figsize=(6,5))
+plt.imshow(inter_flow_mat.values, interpolation="nearest")
+plt.xticks(np.arange(N_CENTERS), centers); plt.yticks(np.arange(N_CENTERS), centers)
+plt.title("Inter-Center Flow Heatmap (units/week) — ZERO"); plt.colorbar()
+q5_flow_png = os.path.join(OUT_DIR, "Q5_InterCenter_Flow_Heatmap_ZERO.png")
+plt.savefig(q5_flow_png, bbox_inches="tight"); plt.close()
+
+fig = plt.figure(figsize=(6,5))
+plt.imshow(inter_traffic_mat.values, interpolation="nearest")
+plt.xticks(np.arange(N_CENTERS), centers); plt.yticks(np.arange(N_CENTERS), centers)
+plt.title("Inter-Center Traffic Heatmap (units*meters/week) — ZERO"); plt.colorbar()
+q5_traffic_png = os.path.join(OUT_DIR, "Q5_InterCenter_Traffic_Heatmap_ZERO.png")
+plt.savefig(q5_traffic_png, bbox_inches="tight"); plt.close()
+
+# -------------------- KPI — Q6 --------------------
+bottleneck_proc = (proc_net_minutes_center / weekly_capacity_minutes_per_process_per_center)\
+                    .replace([np.inf, -np.inf], np.nan).fillna(0.0).sort_values(ascending=False)
+top3 = bottleneck_proc.head(3)
+kpi_rows = [
+    {"Metric": "weekly_min_per_machine", "Value": WEEKLY_MIN_PER_MACHINE},
+    {"Metric": "hours_per_week",          "Value": HOURS_PER_WEEK},
+    {"Metric": "avg_utilization",         "Value": float(bottleneck_proc.mean())},
+    {"Metric": "max_utilization",         "Value": float(bottleneck_proc.max())},
+    {"Metric": "bottleneck_1",            "Value": f"{top3.index[0]}:{float(top3.iloc[0]):.4f}" if len(top3)>=1 else ""},
+    {"Metric": "bottleneck_2",            "Value": f"{top3.index[1]}:{float(top3.iloc[1]):.4f}" if len(top3)>=2 else ""},
+    {"Metric": "bottleneck_3",            "Value": f"{top3.index[2]}:{float(top3.iloc[2]):.4f}" if len(top3)>=3 else ""},
+    {"Metric": "total_intra_edges_per_center", "Value": int(len(edge_records))},
+    {"Metric": "total_inter_center_units_per_week", "Value": 0.0}
+]
+q6_kpi = os.path.join(OUT_DIR, "Q6_KPIs.csv")
+pd.DataFrame(kpi_rows).to_csv(q6_kpi, index=False)
+
+# -------------------- Deliverables index --------------------
+index_rows = []
+save_index_row(index_rows, "Q4", q4_steps,   "Per-part STEP sequences actually used (drives arrows).")
+save_index_row(index_rows, "Q4", q4_util,    "Per-center load/capacity/utilization — WEEK & HOUR.")
+save_index_row(index_rows, "Q4", q4_edges_one, "Per-center edge flows (units/week & units/hour).")
+save_index_row(index_rows, "Q4", q4_edges_all, "Edge flows for all 4 centers, listed by center.")
+save_index_row(index_rows, "Q4", q4_graph,   "Schematic process graph (A..M).")
+if q4_overlay:
+    save_index_row(index_rows, "Q4", q4_overlay, "Layout overlay with arrows labeled x/wk | y/hr.")
+
+save_index_row(index_rows, "Q5", q5_flow_csv,   "Inter-center flow matrix (units/week) — ZERO.")
+save_index_row(index_rows, "Q5", q5_dist_csv,   "Inter-center distances matrix (m) — ZERO.")
+save_index_row(index_rows, "Q5", q5_traffic_csv,"Inter-center traffic matrix (units*meters/week) — ZERO.")
+save_index_row(index_rows, "Q5", q5_flow_png,   "Heatmap of inter-center flow — ZERO.")
+save_index_row(index_rows, "Q5", q5_traffic_png,"Heatmap of inter-center traffic — ZERO.")
+
+save_index_row(index_rows, "Q6", q6_kpi,        "Key performance indicators (CSV).")
+pd.DataFrame(index_rows).to_csv(os.path.join(OUT_DIR, "Deliverables_Index.csv"), index=False)
+
+print("\n✅ Task 3 (Fractal, No Inter-Center Flow) — Completed. Q4 now includes hourly metrics.")
+print(f"📁 Outputs saved in: {OUT_DIR}")
