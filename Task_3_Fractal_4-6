@@ -2,8 +2,11 @@
 # Georgia Tech ISyE 6202 & 6335 - Casework 3
 # Task 3 — Fractal Organization (4 identical centers, NO inter-center flow)
 #
-# UPDATE: Q4_IntraCenter_Utilization.csv now includes hourly columns:
-#   - Hourly_Load_Minutes, Hourly_Capacity_Minutes, Utilization_Hour
+# NEW: Discrete linewidth binning for flow arrows (same bin => same thickness)
+#   - Two methods:
+#       FLOW_BIN_METHOD = "quantile"  (default; robust to scale)
+#       FLOW_BIN_METHOD = "absolute"  (use user thresholds)
+#   - Exports Q4_Edge_Flow_Bins.csv listing each edge's bin & linewidth.
 #
 # Outputs tagged by deliverable:
 #   Q4_*  -> Deliverable (4)
@@ -20,14 +23,27 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from collections import OrderedDict, defaultdict
 
-# -------------------- Paths & constants --------------------
-OUT_DIR = "Task3_Fractal_Outcome_NoInterFlow"
+# -------------------- Tunables --------------------
+OUT_DIR = "/mnt/data/Task3_Fractal_Outcome"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 PATH_TASK1   = "Task1_Full_Capacity_Annual_Weekly_Robust.csv"
 PATH_STEPS   = "Task3_Routing_Steps.csv"                 # optional
 PATH_MINUTES = "Task3_Routing_PerProcess_Minutes.csv"    # optional
 PATH_LAYOUT_IMG = "Screenshot 2025-11-06 at 16.12.00.png"
+
+# Binning for arrow thickness
+FLOW_BIN_METHOD = "quantile"       # "quantile" or "absolute"
+# If absolute, thresholds are in units/week per center; example:
+ABS_THRESHOLDS = [5, 20, 60]       # => edges <=5: Low, <=20: Med, <=60: High, >60: VeryHigh
+
+# Discrete linewidth per bin (same thickness within a bin)
+LINEWIDTH_BY_BIN = {
+    "Low": 1.5,
+    "Med": 3.0,
+    "High": 4.5,
+    "VeryHigh": 6.0
+}
 
 # 4 identical centers; NO inter-center flows
 N_CENTERS = 4
@@ -58,6 +74,35 @@ def ensure_cols(df, cols):
 
 def save_index_row(rows, q, path, desc):
     rows.append({"Deliverable": q, "File": os.path.basename(path), "FullPath": path, "Description": desc})
+
+def assign_flow_bins(values_week):
+    """Assign bin labels based on method; return labels and thresholds actually used."""
+    vals = np.array(values_week, dtype=float)
+    if len(vals) == 0:
+        return [], {}
+
+    if FLOW_BIN_METHOD.lower() == "absolute":
+        t = sorted(ABS_THRESHOLDS)
+        def label(x):
+            if x <= t[0]: return "Low"
+            if x <= t[1]: return "Med"
+            if x <= t[2]: return "High"
+            return "VeryHigh"
+        labels = [label(v) for v in vals]
+        used = {"type":"absolute", "thresholds": t}
+        return labels, used
+
+    # Quantile-based (robust to scale)
+    # Quantiles produce 4 bins by default: <=q60, <=q80, <=q95, >q95
+    q60, q80, q95 = np.quantile(vals, [0.60, 0.80, 0.95])
+    def label(v):
+        if v <= q60: return "Low"
+        if v <= q80: return "Med"
+        if v <= q95: return "High"
+        return "VeryHigh"
+    labels = [label(v) for v in vals]
+    used = {"type":"quantile", "q60": float(q60), "q80": float(q80), "q95": float(q95)}
+    return labels, used
 
 # -------------------- Load Task 1 --------------------
 if not os.path.exists(PATH_TASK1):
@@ -93,7 +138,6 @@ STEP_TABLE_FROM_IMAGE = {
     "P19": ["L","M","L","M"],
     "P20": ["L","K","M"],
 }
-
 if os.path.exists(PATH_STEPS):
     df_steps = pd.read_csv(PATH_STEPS)
     ensure_cols(df_steps, ["Part"])
@@ -106,18 +150,9 @@ if os.path.exists(PATH_STEPS):
             val = str(row[c]).strip() if pd.notna(row[c]) else ""
             if val in PROCESSES:
                 seq.append(val)
-        if seq:
-            STEP_TABLE_FROM_IMAGE[p] = seq
+        if seq: STEP_TABLE_FROM_IMAGE[p] = seq
 
-step_seq = {}
-for p in parts:
-    step_seq[p] = STEP_TABLE_FROM_IMAGE.get(p, ["A","B","C","D","H","J","M"])
-
-# Save steps used — Q4
-q4_steps = os.path.join(OUT_DIR, "Q4_Steps_Used.csv")
-pd.DataFrame(
-    [{"Part": p, **{f"Step{i+1}": s for i, s in enumerate(step_seq[p])}} for p in parts]
-).to_csv(q4_steps, index=False)
+step_seq = {p: STEP_TABLE_FROM_IMAGE.get(p, ["A","B","C","D","H","J","M"]) for p in parts}
 
 # -------------------- Per-process minutes (utilization math) --------------------
 if os.path.exists(PATH_MINUTES):
@@ -130,8 +165,7 @@ else:
     for p in parts:
         total_min = float(s_total_min_per_unit.loc[p])
         visited = [x for x in PROCESSES if x in step_seq[p]]
-        if not visited:
-            continue
+        if not visited: continue
         w = np.array([EQUIP_PER_CENTER[x] for x in visited], dtype=float)
         if w.sum() <= 0: w = np.ones_like(w)
         alloc = (w / w.sum()) * total_min
@@ -154,7 +188,7 @@ proc_net_minutes_center = proc_net_minutes_total / N_CENTERS        # min/week p
 equip_counts = pd.Series(EQUIP_PER_CENTER)
 weekly_capacity_minutes_per_process_per_center = equip_counts * WEEKLY_MIN_PER_MACHINE
 
-# NEW: hourly metrics
+# Hourly metrics
 proc_net_minutes_center_hour   = proc_net_minutes_center / HOURS_PER_WEEK
 hourly_capacity_minutes_center = weekly_capacity_minutes_per_process_per_center / HOURS_PER_WEEK
 
@@ -173,16 +207,13 @@ for c in range(1, N_CENTERS + 1):
             "Center": f"C{c}",
             "Process": proc,
             "Equip_Count": int(EQUIP_PER_CENTER[proc]),
-            # Weekly view
             "Weekly_Load_Minutes": float(proc_net_minutes_center.loc[proc]),
             "Weekly_Capacity_Minutes": float(weekly_capacity_minutes_per_process_per_center.loc[proc]),
             "Utilization_Week": float(utilization_per_process_week.loc[proc]),
-            # Hourly view (NEW)
             "Hourly_Load_Minutes": float(proc_net_minutes_center_hour.loc[proc]),
             "Hourly_Capacity_Minutes": float(hourly_capacity_minutes_center.loc[proc]),
             "Utilization_Hour": float(utilization_per_process_hour.loc[proc]),
         })
-
 q4_util = os.path.join(OUT_DIR, "Q4_IntraCenter_Utilization.csv")
 pd.DataFrame(rows_util).to_csv(q4_util, index=False)
 
@@ -195,45 +226,59 @@ for p in parts:
         if (u in PROCESSES) and (v in PROCESSES):
             edge_flow_week[(u, v)] += units_week
 
-edge_records = []
+# Build edge dataframe
+records = []
 for (a, b), flow_wk in edge_flow_week.items():
     flow_hr = flow_wk / HOURS_PER_WEEK
-    edge_records.append({
-        "From": a,
-        "To": b,
+    records.append({
+        "From": a, "To": b,
         "Flow_Units_per_Week_per_Center": float(flow_wk),
         "Flow_Units_per_Hour_per_Center": float(flow_hr)
     })
+df_edges_per_center = pd.DataFrame(records).sort_values(["From", "To"]).reset_index(drop=True)
 
+# ---------- NEW: Assign bins & linewidths (same bin => same thickness) ----------
+labels, thresholds_used = assign_flow_bins(df_edges_per_center["Flow_Units_per_Week_per_Center"].values)
+df_edges_per_center["Flow_Bin"] = labels
+df_edges_per_center["Linewidth"] = df_edges_per_center["Flow_Bin"].map(LINEWIDTH_BY_BIN).astype(float)
+
+# Save edge tables
 q4_edges_one = os.path.join(OUT_DIR, "Q4_IntraCenter_Process_Edges_Flow_perCenter.csv")
-pd.DataFrame(edge_records).sort_values(["From", "To"]).reset_index(drop=True).to_csv(q4_edges_one, index=False)
+df_edges_per_center.to_csv(q4_edges_one, index=False)
 
+# Also save a compact bins-only list (for your report)
+q4_bins = os.path.join(OUT_DIR, "Q4_Edge_Flow_Bins.csv")
+df_edges_per_center[["From","To","Flow_Units_per_Week_per_Center","Flow_Bin","Linewidth"]].to_csv(q4_bins, index=False)
+
+# Expand to all centers (values identical per center)
 rows_edges_all = []
 for c in range(1, N_CENTERS + 1):
-    for rec in edge_records:
+    for _, r in df_edges_per_center.iterrows():
         rows_edges_all.append({
             "Center": f"C{c}",
-            "From": rec["From"],
-            "To": rec["To"],
-            "Flow_Units_per_Week": rec["Flow_Units_per_Week_per_Center"],
-            "Flow_Units_per_Hour": rec["Flow_Units_per_Hour_per_Center"]
+            "From": r["From"], "To": r["To"],
+            "Flow_Units_per_Week": r["Flow_Units_per_Week_per_Center"],
+            "Flow_Units_per_Hour": r["Flow_Units_per_Hour_per_Center"],
+            "Flow_Bin": r["Flow_Bin"],
+            "Linewidth": r["Linewidth"]
         })
 q4_edges_all = os.path.join(OUT_DIR, "Q4_IntraCenter_Process_Edges_Flow_AllCenters.csv")
-pd.DataFrame(rows_edges_all).sort_values(["Center", "From", "To"]).reset_index(drop=True).to_csv(q4_edges_all, index=False)
+pd.DataFrame(rows_edges_all).sort_values(["Center","From","To"]).to_csv(q4_edges_all, index=False)
 
-# Schematic graph — Q4
+# -------------------- Schematic graph — Q4 --------------------
 fig = plt.figure(figsize=(10, 6))
 for i, proc in enumerate(PROCESSES):
     plt.text(i, 0, proc, ha="center", va="center")
-for (a, b), flow_wk in edge_flow_week.items():
-    i = PROCESSES.index(a); j = PROCESSES.index(b)
-    plt.arrow(i, 0.05, (j - i)*0.9, 0, head_width=0.05, head_length=0.1, length_includes_head=True)
-plt.title("Intra-Center Process Flow (per center) — Schematic")
+for _, r in df_edges_per_center.iterrows():
+    i = PROCESSES.index(r["From"]); j = PROCESSES.index(r["To"])
+    lw = float(r["Linewidth"])
+    plt.arrow(i, 0.05, (j - i)*0.9, 0, head_width=0.05, head_length=0.1, length_includes_head=True, linewidth=lw)
+plt.title("Intra-Center Process Flow (per center) — Schematic (Binned)")
 plt.axis("off")
-q4_graph = os.path.join(OUT_DIR, "Q4_IntraCenter_Process_Graph.png")
+q4_graph = os.path.join(OUT_DIR, "Q4_IntraCenter_Process_Graph_Binned.png")
 plt.savefig(q4_graph, bbox_inches="tight"); plt.close()
 
-# Layout overlay — Q4
+# -------------------- Layout overlay (binned linewidths) — Q4 --------------------
 if os.path.exists(PATH_LAYOUT_IMG):
     img = mpimg.imread(PATH_LAYOUT_IMG)
     h, w = img.shape[0], img.shape[1]
@@ -244,20 +289,35 @@ if os.path.exists(PATH_LAYOUT_IMG):
         "J": (0.70, 0.45), "K": (0.92, 0.38), "L": (0.92, 0.53), "M": (0.92, 0.70),
     }
     def rel_to_px(x_rel, y_rel): return x_rel * w, y_rel * h
-    fig = plt.figure(figsize=(12, 7)); plt.imshow(img); plt.axis("off")
-    plt.title("Center Layout — Process Flows (x/wk | y/hr per center)")
+
+    fig = plt.figure(figsize=(12, 7))
+    plt.imshow(img); plt.axis("off")
+    plt.title("Center Layout — Binned Flows (x/wk | y/hr per center)")
+
+    # labels for processes
     for proc, (xr, yr) in PROCESS_ANCHORS.items():
         x, y = rel_to_px(xr, yr); plt.text(x, y, proc, ha="center", va="center")
-    for (u, v), flow_wk in edge_flow_week.items():
-        flow_hr = flow_wk / HOURS_PER_WEEK
-        if flow_wk <= 0 or (u not in PROCESS_ANCHORS) or (v not in PROCESS_ANCHORS): continue
+
+    # arrows with discrete linewidth
+    for _, r in df_edges_per_center.iterrows():
+        u, v = r["From"], r["To"]
+        flow_wk = float(r["Flow_Units_per_Week_per_Center"])
+        flow_hr = float(r["Flow_Units_per_Hour_per_Center"])
+        lw = float(r["Linewidth"])
+        if (u not in PROCESS_ANCHORS) or (v not in PROCESS_ANCHORS): continue
         x1, y1 = rel_to_px(*PROCESS_ANCHORS[u]); x2, y2 = rel_to_px(*PROCESS_ANCHORS[v])
         dx, dy = x2 - x1, y2 - y1
-        lw = max(1.0, min(6.0, 0.5 + 0.02 * float(flow_wk)))
         plt.arrow(x1, y1, dx, dy, length_includes_head=True, head_width=12, head_length=18, linewidth=lw)
         lx, ly = x1 + 0.6*dx, y1 + 0.6*dy
         plt.text(lx, ly, f"{flow_wk:.1f}/wk | {flow_hr:.2f}/hr", ha="center", va="center")
-    q4_overlay = os.path.join(OUT_DIR, "Q4_Center_Layout_Overlay_Flows_Week_Hour.png")
+
+    # add a small legend panel (text-only) for bins
+    legend_text = [f"{bin_name}: lw={lw}" for bin_name, lw in LINEWIDTH_BY_BIN.items()]
+    legend_text = " | ".join(legend_text)
+    plt.text(0.02*w, 0.96*h, f"Bins: {thresholds_used}", va="top")  # method & thresholds
+    plt.text(0.02*w, 0.92*h, legend_text, va="top")
+
+    q4_overlay = os.path.join(OUT_DIR, "Q4_Center_Layout_Overlay_Flows_Binned.png")
     plt.savefig(q4_overlay, bbox_inches="tight", dpi=200); plt.close()
 else:
     q4_overlay = ""
@@ -299,7 +359,7 @@ kpi_rows = [
     {"Metric": "bottleneck_1",            "Value": f"{top3.index[0]}:{float(top3.iloc[0]):.4f}" if len(top3)>=1 else ""},
     {"Metric": "bottleneck_2",            "Value": f"{top3.index[1]}:{float(top3.iloc[1]):.4f}" if len(top3)>=2 else ""},
     {"Metric": "bottleneck_3",            "Value": f"{top3.index[2]}:{float(top3.iloc[2]):.4f}" if len(top3)>=3 else ""},
-    {"Metric": "total_intra_edges_per_center", "Value": int(len(edge_records))},
+    {"Metric": "total_intra_edges_per_center", "Value": int(len(df_edges_per_center))},
     {"Metric": "total_inter_center_units_per_week", "Value": 0.0}
 ]
 q6_kpi = os.path.join(OUT_DIR, "Q6_KPIs.csv")
@@ -307,13 +367,13 @@ pd.DataFrame(kpi_rows).to_csv(q6_kpi, index=False)
 
 # -------------------- Deliverables index --------------------
 index_rows = []
-save_index_row(index_rows, "Q4", q4_steps,   "Per-part STEP sequences actually used (drives arrows).")
+save_index_row(index_rows, "Q4", os.path.join(OUT_DIR, "Q4_Steps_Used.csv"), "Per-part STEP sequences actually used (drives arrows).")
 save_index_row(index_rows, "Q4", q4_util,    "Per-center load/capacity/utilization — WEEK & HOUR.")
-save_index_row(index_rows, "Q4", q4_edges_one, "Per-center edge flows (units/week & units/hour).")
-save_index_row(index_rows, "Q4", q4_edges_all, "Edge flows for all 4 centers, listed by center.")
-save_index_row(index_rows, "Q4", q4_graph,   "Schematic process graph (A..M).")
+save_index_row(index_rows, "Q4", q4_edges_one, "Per-center edge flows with bins & linewidths.")
+save_index_row(index_rows, "Q4", q4_bins,    "Edge bin summary (same-bin = same thickness).")
+save_index_row(index_rows, "Q4", q4_graph,   "Schematic process graph (binned).")
 if q4_overlay:
-    save_index_row(index_rows, "Q4", q4_overlay, "Layout overlay with arrows labeled x/wk | y/hr.")
+    save_index_row(index_rows, "Q4", q4_overlay, "Layout overlay with discrete linewidths (x/wk | y/hr).")
 
 save_index_row(index_rows, "Q5", q5_flow_csv,   "Inter-center flow matrix (units/week) — ZERO.")
 save_index_row(index_rows, "Q5", q5_dist_csv,   "Inter-center distances matrix (m) — ZERO.")
@@ -324,5 +384,5 @@ save_index_row(index_rows, "Q5", q5_traffic_png,"Heatmap of inter-center traffic
 save_index_row(index_rows, "Q6", q6_kpi,        "Key performance indicators (CSV).")
 pd.DataFrame(index_rows).to_csv(os.path.join(OUT_DIR, "Deliverables_Index.csv"), index=False)
 
-print("\n✅ Task 3 (Fractal, No Inter-Center Flow) — Completed. Q4 now includes hourly metrics.")
+print("\n✅ Task 3 (Fractal, No Inter-Center Flow) — Completed with binned arrow thickness.")
 print(f"📁 Outputs saved in: {OUT_DIR}")
