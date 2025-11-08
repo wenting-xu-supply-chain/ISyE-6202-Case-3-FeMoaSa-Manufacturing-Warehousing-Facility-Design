@@ -9,24 +9,21 @@ import os
 # - Per-part ANNUAL & WEEKLY mean/std
 # - Robust (99.5%) for annual & weekly
 # - Product-level weekly tables and parts-by-family weekly table
+# - NEW: Parts-by-family Weekly Robust Units + Weekly_Robust_Gross_Minutes (one file)
 # - All outputs suffixed with 'Yp1'
 # ============================================================
 
-# ------------------ Tunables / Constants -------------------
 EFFICIENCY = 0.90
 RELIABILITY = 0.98
-SERVICE_LEVEL = 0.995         # OTIF target
+SERVICE_LEVEL = 0.995
 Z_SCORE = norm.ppf(SERVICE_LEVEL)  # ≈ 2.576
 WEEKS_PER_YEAR = 52.0
 PRODUCT_FAMILIES = ['A1', 'A2', 'A3', 'B1', 'B2']
 
-# ------------------ Paths (Update-safe) --------------------
 EXCEL_PATH = "iSYE 6202 & 6335 2025 Casework 3 FaMoaSa Facility Design - Tables and Basic Layouts.xlsx"
 OUT_DIR = "Task1_Outcome"
 
-# ------------------ Helpers -------------------------------
 def natural_sort_index(idx):
-    """Return labels sorted like P1, P2, ..., P10 by numeric suffix."""
     def key(label):
         s = str(label)
         num = ''.join(ch for ch in s if ch.isdigit())
@@ -38,13 +35,12 @@ def ensure_cols(df, cols):
     if missing:
         raise KeyError(f"Missing columns {missing} in DataFrame with columns {list(df.columns)}")
 
-# ------------------ Main Pipeline -------------------------
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     if not os.path.exists(EXCEL_PATH):
         raise FileNotFoundError(f"Excel file not found at: {EXCEL_PATH}")
 
-    # === 1) Read +1 Year Product Demand (ANNUAL mean) ===
+    # === 1) +1 Year Demand (Annual mean) ===
     demand_avg_raw = pd.read_excel(EXCEL_PATH, sheet_name="+1 Year Product Demand", header=16)
     ensure_cols(demand_avg_raw, ['Year'] + PRODUCT_FAMILIES)
     demand_avg = demand_avg_raw[['Year'] + PRODUCT_FAMILIES].dropna()
@@ -53,7 +49,7 @@ def main():
         raise ValueError("No '+#' rows found in the average demand block.")
     product_demand_avg = demand_avg.iloc[0][PRODUCT_FAMILIES].astype(float)
 
-    # === 2) Read +1 Year Product Demand (ANNUAL std) ===
+    # === 2) +1 Year Demand (Annual std) ===
     demand_std_raw = pd.read_excel(EXCEL_PATH, sheet_name="+1 Year Product Demand", header=21)
     ensure_cols(demand_std_raw, ['Year'] + PRODUCT_FAMILIES)
     demand_std = demand_std_raw.dropna(subset=['Year'])
@@ -63,17 +59,17 @@ def main():
     product_demand_std = demand_std.iloc[0][PRODUCT_FAMILIES].astype(float)
     product_demand_var = product_demand_std ** 2
 
-    # --- Save product-level inputs (ANNUAL, suffixed Yp1) ---
+    # Save annual product inputs (Yp1)
     demand_avg.to_csv(os.path.join(OUT_DIR, "Product_Demand_Annual_Avg_Yp1.csv"), index=False)
     demand_std.to_csv(os.path.join(OUT_DIR, "Product_Demand_Annual_StdDev_Yp1.csv"), index=False)
 
-    # === 2.1) Product-level WEEKLY avg/std (derived), suffixed Yp1 ===
+    # === 2.1) Product-level WEEKLY (derived) ===
     product_weekly_avg = (product_demand_avg / WEEKS_PER_YEAR).rename_axis("Family").reset_index(name="Weekly_Avg_Units")
     product_weekly_std = (product_demand_std / np.sqrt(WEEKS_PER_YEAR)).rename_axis("Family").reset_index(name="Weekly_StdDev_Units")
     product_weekly_avg.to_csv(os.path.join(OUT_DIR, "Product_Demand_Weekly_Avg_Yp1.csv"), index=False)
     product_weekly_std.to_csv(os.path.join(OUT_DIR, "Product_Demand_Weekly_StdDev_Yp1.csv"), index=False)
 
-    # === 3) BOM: +1 Year Parts per Product ===
+    # === 3) BOM ===
     parts_raw = pd.read_excel(EXCEL_PATH, sheet_name="+1 Year Parts per Product", header=9)
     rename_map = {
         'Parts per Assembled Product Unit Demanded in Year +1 ': 'A1',
@@ -86,44 +82,37 @@ def main():
     ensure_cols(parts_raw, ['Part'] + PRODUCT_FAMILIES)
     parts_df = parts_raw[['Part'] + PRODUCT_FAMILIES].dropna(subset=['Part']).reset_index(drop=True)
 
-    # Enforce natural order P1..P20 on BOM and save with Yp1
     parts_df = parts_df.set_index('Part').loc[natural_sort_index(parts_df['Part'])].reset_index()
     parts_df.to_csv(os.path.join(OUT_DIR, "Parts_Per_Product_BOM_Yp1.csv"), index=False)
 
-    # Numeric BOM matrices
     parts_bom = parts_df.set_index('Part').apply(pd.to_numeric, errors='coerce').fillna(0.0)
     parts_bom_sq = parts_bom ** 2
 
-    # === 4) Parts-by-family (ANNUAL) user-view, suffixed Yp1 ===
-    parts_demand_by_family_annual = parts_bom.copy()
+    # === 4) Parts-by-family Annual (Task1-style) ===
+    parts_byfam_annual = parts_bom.copy()
     for col in PRODUCT_FAMILIES:
-        parts_demand_by_family_annual[col] = parts_demand_by_family_annual[col] * product_demand_avg[col]
-    parts_demand_by_family_annual['Total Demand (Annual Avg)'] = parts_demand_by_family_annual[PRODUCT_FAMILIES].sum(axis=1)
-    parts_demand_by_family_annual = parts_demand_by_family_annual.loc[natural_sort_index(parts_demand_by_family_annual.index)]
-    parts_demand_by_family_annual.to_csv(os.path.join(OUT_DIR, "Parts_Total_Demand_By_Family_AnnualAvg_Yp1.csv"))
+        parts_byfam_annual[col] = parts_byfam_annual[col] * product_demand_avg[col]
+    parts_byfam_annual['Total Demand (Annual Avg)'] = parts_byfam_annual[PRODUCT_FAMILIES].sum(axis=1)
+    parts_byfam_annual = parts_byfam_annual.loc[natural_sort_index(parts_byfam_annual.index)]
+    parts_byfam_annual.to_csv(os.path.join(OUT_DIR, "Parts_Total_Demand_By_Family_AnnualAvg_Yp1.csv"))
 
-    # === 4.1) Parts-by-family (WEEKLY) user-view, suffixed Yp1 ===
-    parts_demand_by_family_weekly = parts_bom.copy()
+    # === 4.1) Parts-by-family Weekly Avg (Task1-style) ===
     weekly_family_avg = (product_demand_avg / WEEKS_PER_YEAR)
+    parts_byfam_weekly = parts_bom.copy()
     for col in PRODUCT_FAMILIES:
-        parts_demand_by_family_weekly[col] = parts_demand_by_family_weekly[col] * weekly_family_avg[col]
-    parts_demand_by_family_weekly['Total Demand (Weekly Avg)'] = parts_demand_by_family_weekly[PRODUCT_FAMILIES].sum(axis=1)
-    parts_demand_by_family_weekly = parts_demand_by_family_weekly.loc[natural_sort_index(parts_demand_by_family_weekly.index)]
-    parts_demand_by_family_weekly.to_csv(os.path.join(OUT_DIR, "Parts_Total_Demand_By_Family_WeeklyAvg_Yp1.csv"))
+        parts_byfam_weekly[col] = parts_byfam_weekly[col] * weekly_family_avg[col]
+    parts_byfam_weekly['Total Demand (Weekly Avg)'] = parts_byfam_weekly[PRODUCT_FAMILIES].sum(axis=1)
+    parts_byfam_weekly = parts_byfam_weekly.loc[natural_sort_index(parts_byfam_weekly.index)]
+    parts_byfam_weekly.to_csv(os.path.join(OUT_DIR, "Parts_Total_Demand_By_Family_WeeklyAvg_Yp1.csv"))
 
-    # === 5) Per-part ANNUAL mean & std (linear combination) ===
+    # === 5) Per-part Annual mean/std ===
     s_part_annual_mean = parts_bom.dot(product_demand_avg)   # Units/year
-    s_part_annual_mean.name = "Annual_Demand_Mean_Units"
+    s_part_annual_var  = parts_bom_sq.dot(product_demand_var)
+    s_part_annual_std  = np.sqrt(s_part_annual_var)          # Units/year
 
-    s_part_annual_var = parts_bom_sq.dot(product_demand_var)
-    s_part_annual_std = np.sqrt(s_part_annual_var)           # Units/year
-    s_part_annual_std.name = "Annual_Demand_StdDev_Units"
-
-    # === 6) Per-part WEEKLY mean & std ===
+    # === 6) Per-part Weekly mean/std ===
     weekly_mean = s_part_annual_mean / WEEKS_PER_YEAR
-    weekly_mean.name = "Weekly_Demand_Mean_Units"
-    weekly_std = s_part_annual_std / np.sqrt(WEEKS_PER_YEAR)
-    weekly_std.name = "Weekly_Demand_StdDev_Units"
+    weekly_std  = s_part_annual_std / np.sqrt(WEEKS_PER_YEAR)
 
     # === 7) Process time & Robust ===
     time_data = {
@@ -139,18 +128,40 @@ def main():
     df_time = pd.DataFrame(time_data).set_index('Part').fillna(0.0)
     s_minutes_per_unit = df_time.sum(axis=1).rename("Total_Minutes_Per_Unit")
 
-    # Robust = mean + z*std (Annual + Weekly)
+    # Per-part robust (units)
     s_robust_annual_units = s_part_annual_mean + Z_SCORE * s_part_annual_std
     s_robust_weekly_units = weekly_mean + Z_SCORE * weekly_std
 
-    # Robust minutes (Net & Gross) for Annual & Weekly
-    s_robust_annual_net_min = s_robust_annual_units * s_minutes_per_unit
-    s_robust_annual_gross_min = s_robust_annual_net_min / (EFFICIENCY * RELIABILITY)
-
-    s_robust_weekly_net_min = s_robust_weekly_units * s_minutes_per_unit
+    # Per-part robust (minutes)
+    s_robust_weekly_net_min   = s_robust_weekly_units * s_minutes_per_unit
     s_robust_weekly_gross_min = s_robust_weekly_net_min / (EFFICIENCY * RELIABILITY)
 
-    # === 8) Final per-part table (natural order P1..P20) ===
+    s_robust_annual_net_min   = s_robust_annual_units * s_minutes_per_unit
+    s_robust_annual_gross_min = s_robust_annual_net_min / (EFFICIENCY * RELIABILITY)
+
+    # === 7.1) NEW: Parts-by-family Weekly Robust (Units + Gross Minutes) ===
+    # Family-level weekly robust units
+    fam_weekly_mean = product_demand_avg / WEEKS_PER_YEAR
+    fam_weekly_std  = product_demand_std / np.sqrt(WEEKS_PER_YEAR)
+    fam_weekly_robust = fam_weekly_mean + Z_SCORE * fam_weekly_std   # Series indexed by family
+
+    # Matrix: (Part x Family) robust units
+    parts_byfam_weekly_robust_units = parts_bom.mul(fam_weekly_robust, axis=1)
+    # Matrix: (Part x Family) robust gross minutes
+    parts_byfam_weekly_robust_gross = parts_byfam_weekly_robust_units.mul(s_minutes_per_unit, axis=0) / (EFFICIENCY * RELIABILITY)
+
+    # Combine into one table with both units & gross minutes
+    out_units = parts_byfam_weekly_robust_units.copy()
+    out_minutes = parts_byfam_weekly_robust_gross.copy()
+    out_minutes.columns = [f"{c}_GrossMin" for c in out_minutes.columns]
+
+    combo = pd.concat([out_units, out_minutes], axis=1)
+    combo["Total Weekly Robust Units"] = out_units.sum(axis=1)
+    combo["Total Weekly Robust Gross Minutes"] = out_minutes.sum(axis=1)
+    combo = combo.loc[natural_sort_index(combo.index)]
+    combo.to_csv(os.path.join(OUT_DIR, "Parts_By_Family_Weekly_Robust_Units_and_GrossMinutes_Yp1.csv"))
+
+    # === 8) Final per-part full table ===
     df_full = pd.concat([
         s_part_annual_mean.rename("Annual_Demand_Mean_Units"),
         s_part_annual_std.rename("Annual_Demand_StdDev_Units"),
@@ -166,7 +177,7 @@ def main():
     ], axis=1)
     df_full = df_full.loc[natural_sort_index(df_full.index)]
 
-    # === 9) Write outputs (ALL suffixed Yp1) ===
+    # === 9) Write per-part summaries (Yp1) ===
     full_out   = os.path.join(OUT_DIR, "Task1_Full_Capacity_Annual_Weekly_Robust_Yp1.csv")
     weekly_out = os.path.join(OUT_DIR, "Task1_Per_Part_Weekly_Mean_Std_Robust_Yp1.csv")
 
@@ -179,7 +190,6 @@ def main():
         'Weekly_Robust_Gross_Minutes'
     ]].to_csv(weekly_out)
 
-    # Also keep auxiliary inputs (file list)
     print("✅ Done. Outputs saved to:", os.path.abspath(OUT_DIR))
     print(" -", os.path.basename(full_out))
     print(" -", os.path.basename(weekly_out))
@@ -190,6 +200,7 @@ def main():
     print(" - Parts_Per_Product_BOM_Yp1.csv")
     print(" - Parts_Total_Demand_By_Family_AnnualAvg_Yp1.csv")
     print(" - Parts_Total_Demand_By_Family_WeeklyAvg_Yp1.csv")
+    print(" - Parts_By_Family_Weekly_Robust_Units_and_GrossMinutes_Yp1.csv")  # NEW
 
 if __name__ == "__main__":
     main()
