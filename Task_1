@@ -11,6 +11,7 @@ import os
 # - Adds WEEKLY Robust (99.5%) mirroring ANNUAL Robust
 # - Preserves natural order P1..P20
 # - Uses the LATEST uploaded Excel filename
+# - NEW: Adds product-level weekly avg/std and parts-by-family weekly avg tables
 # ============================================================
 
 # ------------------ Tunables / Constants -------------------
@@ -66,9 +67,16 @@ def main():
     product_demand_std = demand_std.iloc[0][PRODUCT_FAMILIES].astype(float)
     product_demand_var = product_demand_std ** 2
 
-    # Save cleaned product-level inputs (annual)
+    # --- Save cleaned product-level inputs (annual) ---
     demand_avg.to_csv(os.path.join(OUT_DIR, "Product_Demand_Annual_Avg.csv"), index=False)
     demand_std.to_csv(os.path.join(OUT_DIR, "Product_Demand_Annual_StdDev.csv"), index=False)
+
+    # === 2.1) NEW: Product-level WEEKLY avg/std derived from annual ===
+    # mean_week = mean_year / 52 ; std_week = std_year / sqrt(52)
+    product_weekly_avg = (product_demand_avg / WEEKS_PER_YEAR).rename_axis("Family").reset_index(name="Weekly_Avg_Units")
+    product_weekly_std = (product_demand_std / np.sqrt(WEEKS_PER_YEAR)).rename_axis("Family").reset_index(name="Weekly_StdDev_Units")
+    product_weekly_avg.to_csv(os.path.join(OUT_DIR, "Product_Demand_Weekly_Avg.csv"), index=False)
+    product_weekly_std.to_csv(os.path.join(OUT_DIR, "Product_Demand_Weekly_StdDev.csv"), index=False)
 
     # === 3) BOM: +1 Year Parts per Product ===
     # Header ≈ row 10 -> header=9
@@ -94,16 +102,24 @@ def main():
     parts_bom_sq = parts_bom ** 2
 
     # === 4) Average parts demand by family (ANNUAL, user-view) ===
-    parts_demand_by_family = parts_bom.copy()
+    parts_demand_by_family_annual = parts_bom.copy()
     for col in PRODUCT_FAMILIES:
-        parts_demand_by_family[col] = parts_demand_by_family[col] * product_demand_avg[col]
-    parts_demand_by_family['Total Demand (Annual Avg)'] = parts_demand_by_family[PRODUCT_FAMILIES].sum(axis=1)
-    parts_demand_by_family = parts_demand_by_family.loc[natural_sort_index(parts_demand_by_family.index)]
-    parts_demand_by_family.to_csv(os.path.join(OUT_DIR, "Parts_Total_Demand_By_Family_AnnualAvg.csv"))
+        parts_demand_by_family_annual[col] = parts_demand_by_family_annual[col] * product_demand_avg[col]
+    parts_demand_by_family_annual['Total Demand (Annual Avg)'] = parts_demand_by_family_annual[PRODUCT_FAMILIES].sum(axis=1)
+    parts_demand_by_family_annual = parts_demand_by_family_annual.loc[natural_sort_index(parts_demand_by_family_annual.index)]
+    parts_demand_by_family_annual.to_csv(os.path.join(OUT_DIR, "Parts_Total_Demand_By_Family_AnnualAvg.csv"))
+
+    # === 4.1) NEW: Average parts demand by family (WEEKLY, same layout as AnnualAvg) ===
+    parts_demand_by_family_weekly = parts_bom.copy()
+    # multiply each family column by the family's weekly average
+    weekly_family_avg = (product_demand_avg / WEEKS_PER_YEAR)
+    for col in PRODUCT_FAMILIES:
+        parts_demand_by_family_weekly[col] = parts_demand_by_family_weekly[col] * weekly_family_avg[col]
+    parts_demand_by_family_weekly['Total Demand (Weekly Avg)'] = parts_demand_by_family_weekly[PRODUCT_FAMILIES].sum(axis=1)
+    parts_demand_by_family_weekly = parts_demand_by_family_weekly.loc[natural_sort_index(parts_demand_by_family_weekly.index)]
+    parts_demand_by_family_weekly.to_csv(os.path.join(OUT_DIR, "Parts_Total_Demand_By_Family_WeeklyAvg.csv"))
 
     # === 5) Per-part ANNUAL mean & std (linear combination) ===
-    # mean_annual(part) = BOM_row · product_mean
-    # var_annual(part)  = (BOM_row^2) · product_var  (families assumed independent)
     s_part_annual_mean = parts_bom.dot(product_demand_avg)   # Units/year
     s_part_annual_mean.name = "Annual_Demand_Mean_Units"
 
@@ -114,13 +130,10 @@ def main():
     # === 6) Per-part WEEKLY mean & std ===
     weekly_mean = s_part_annual_mean / WEEKS_PER_YEAR
     weekly_mean.name = "Weekly_Demand_Mean_Units"
-
-    # If annual is sum of 52 iid weeks: std_week = std_annual / sqrt(52)
     weekly_std = s_part_annual_std / np.sqrt(WEEKS_PER_YEAR)
     weekly_std.name = "Weekly_Demand_StdDev_Units"
 
     # === 7) Process time (screen-transcribed) & Robust ===
-    # Used to translate demand into minutes for robust capacity checks
     time_data = {
         'Part': ['P1','P2','P3','P4','P5','P6','P7','P8','P9','P10','P11','P12','P13','P14','P15','P16','P17','P18','P19','P20'],
         'Step 1': [2.5,1.25,1.75,1.0,1.5,0.75,1.0,1.25,1.75,1.5,1.25,1.0,1.25,1.0,0.75,1.25,0.75,0.75,2.25,2.0],
@@ -138,20 +151,17 @@ def main():
     # Robust = mean + z*std (Annual + Weekly)
     s_robust_annual_units = s_part_annual_mean + Z_SCORE * s_part_annual_std
     s_robust_annual_units.name = "Annual_Robust_Demand_99p5_Units"
-
     s_robust_weekly_units = weekly_mean + Z_SCORE * weekly_std
     s_robust_weekly_units.name = "Weekly_Robust_Demand_99p5_Units"
 
     # Robust minutes (Net & Gross) for Annual & Weekly
     s_robust_annual_net_min = s_robust_annual_units * s_minutes_per_unit
     s_robust_annual_net_min.name = "Annual_Robust_Net_Minutes"
-
     s_robust_annual_gross_min = s_robust_annual_net_min / (EFFICIENCY * RELIABILITY)
     s_robust_annual_gross_min.name = "Annual_Robust_Gross_Minutes"
 
     s_robust_weekly_net_min = s_robust_weekly_units * s_minutes_per_unit
     s_robust_weekly_net_min.name = "Weekly_Robust_Net_Minutes"
-
     s_robust_weekly_gross_min = s_robust_weekly_net_min / (EFFICIENCY * RELIABILITY)
     s_robust_weekly_gross_min.name = "Weekly_Robust_Gross_Minutes"
 
@@ -172,8 +182,8 @@ def main():
     df_full = df_full.loc[natural_sort_index(df_full.index)]
 
     # === 9) Write outputs (UPDATED NAMES) ===
-    full_out = os.path.join(OUT_DIR, "Task1_Full_Capacity_Annual_Weekly_Robust.csv")
-    weekly_out = os.path.join(OUT_DIR, "Task1_Per_Part_Weekly_Mean_Std_Robust.csv")
+    full_out = os.path.join(OUT_DIR, "Task1_Full_Capacity_Annual_Weekly_Robust_Yp1.csv")
+    weekly_out = os.path.join(OUT_DIR, "Task1_Per_Part_Weekly_Mean_Std_Robust_Yp1.csv")
 
     df_full.to_csv(full_out)
     df_full[['Weekly_Demand_Mean_Units',
@@ -186,10 +196,13 @@ def main():
     print("✅ Done. Outputs saved to:", os.path.abspath(OUT_DIR))
     print(" -", os.path.basename(full_out))
     print(" -", os.path.basename(weekly_out))
-    print(" - Product_Demand_Annual_Avg.csv")
-    print(" - Product_Demand_Annual_StdDev.csv")
-    print(" - Parts_Per_Product_BOM.csv")
-    print(" - Parts_Total_Demand_By_Family_AnnualAvg.csv")
+    print(" - Product_Demand_Annual_Avg_Yp1.csv")
+    print(" - Product_Demand_Annual_StdDev_Yp1.csv")
+    print(" - Product_Demand_Weekly_Avg_Yp1.csv")            # NEW
+    print(" - Product_Demand_Weekly_StdDev_Yp1.csv")         # NEW
+    print(" - Parts_Per_Product_BOM_Yp1.csv")
+    print(" - Parts_Total_Demand_By_Family_AnnualAvg_Yp1.csv")
+    print(" - Parts_Total_Demand_By_Family_WeeklyAvg_Yp1.csv")  # NEW
 
 if __name__ == "__main__":
     main()
