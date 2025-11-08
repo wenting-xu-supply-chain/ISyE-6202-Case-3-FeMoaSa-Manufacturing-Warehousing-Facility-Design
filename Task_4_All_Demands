@@ -3,24 +3,22 @@
 ISyE 6202 & 6335 - Casework 3
 Task 4: Multi-Year Capacity Plan (Years +2..+5)
 
-Highlights:
-- Robust parsing of the consolidated +2..+5 demand sheets:
-  * Collect ALL candidate rows for each year and choose the one with the largest total.
-  * Prefer Standard Deviation (absolute) blocks; if missing, use CV blocks and convert: std = cv * mean.
-  * Re-detect family columns independently for Mean and Std/CV (never reuse mean’s columns).
-- Hardened BOM reader:
-  * Detect the 'Part' column by Pxx frequency.
-  * Detect each family column by scanning the header region; missing families are filled with zeros (warning only).
-- Outputs per year:
-  * Full capacity table
-  * Weekly slice
-  * Annual slice (NEW)
-- End-to-end NaN->0.0 handling, with diagnostics printed to console.
+Outputs per year (+2..+5), all suffixed with YpN:
+- Task4_Full_Capacity_Annual_Weekly_Robust_YpN.csv
+- Task4_Per_Part_Weekly_Mean_Std_Robust_YpN.csv
+- Task4_Per_Part_Annual_Mean_Std_Robust_YpN.csv
+- Product_Demand_Annual_Avg_YpN.csv
+- Product_Demand_Annual_StdDev_YpN.csv
+- Product_Demand_Weekly_Avg_YpN.csv
+- Product_Demand_Weekly_StdDev_YpN.csv
+- Parts_Per_Product_BOM_YpN.csv
+- Parts_Total_Demand_By_Family_AnnualAvg_YpN.csv
+- Parts_Total_Demand_By_Family_WeeklyAvg_YpN.csv
 """
 
 import os, re, math
 from pathlib import Path
-from typing import Dict, List, Tuple, Iterable
+from typing import Dict, List, Iterable
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
@@ -33,7 +31,6 @@ Z               = norm.ppf(SERVICE_LEVEL)
 WEEKS_PER_YEAR  = 52.0
 YEARS           = [2, 3, 4, 5]
 
-# >>> Update if your workbook filename differs <<<
 EXCEL_PATH      = "iSYE 6202 & 6335 2025 Casework 3 FaMoaSa Facility Design - Tables and Basic Layouts.xlsx"
 ROOT_OUT        = "Task4_Outcome_All_Demands"
 
@@ -73,12 +70,7 @@ def to_float(x) -> float:
     return -v if neg else v
 
 def to_float_pct(x) -> float:
-    """
-    Percent-aware numeric parsing:
-    - '12.5%' -> 0.125
-    - '(15%)' -> -0.15
-    - '0.2'   -> 0.2 (already a fraction)
-    """
+    """Percent-aware numeric parsing: '12.5%'->0.125, '(15%)'->-0.15, '0.2' stays 0.2."""
     if isinstance(x, (int, float, np.integer, np.floating)) and not pd.isna(x):
         return float(x)
     if x is None:
@@ -96,7 +88,7 @@ def to_float_pct(x) -> float:
         m = re.match(r"^[+-]?\d+(?:\.\d+)?", s)
         if not m:
             return np.nan
-        v = float(m.group(0))/100.0
+        v = float(m.group(0)) / 100.0
         return -v if neg else v
     m = re.match(r"^[+-]?\d+(?:\.\d+)?", s)
     if not m:
@@ -104,7 +96,6 @@ def to_float_pct(x) -> float:
     v = float(m.group(0))
     return -v if neg else v
 
-# ---------------- Header helpers ----------------
 def row_labels_map(row_vals) -> Dict[str, int]:
     """Map exact string cell -> column index for a given row."""
     out = {}
@@ -125,10 +116,7 @@ def detect_families_in_row(raw: pd.DataFrame, r: int) -> List[str]:
 def collect_year_rows(raw: pd.DataFrame, header_row: int, year_col: int,
                       fam_cols: Dict[str,int], fam_order: List[str],
                       value_parser=to_float, scan_down=120) -> Dict[str, List[pd.Series]]:
-    """
-    Collect ALL candidate rows for +2..+5 under a given header row.
-    Return { '+2': [Series1, Series2, ...], ... }.
-    """
+    """Collect ALL candidate rows for +2..+5 under a given header row."""
     nrows = raw.shape[0]
     out: Dict[str, List[pd.Series]] = {f"+{y}": [] for y in YEARS}
     for r in range(header_row+1, min(header_row+1+scan_down, nrows)):
@@ -137,7 +125,6 @@ def collect_year_rows(raw: pd.DataFrame, header_row: int, year_col: int,
             tag = yv.strip()
             vals = [value_parser(raw.iat[r, fam_cols[f]]) if f in fam_cols else np.nan for f in fam_order]
             out[tag].append(pd.Series(vals, index=fam_order, dtype="float64").fillna(0.0))
-        # Do NOT break on empty rows; some workbooks have multiple separated blocks.
     return out
 
 def choose_by_sum(cands: List[pd.Series]) -> pd.Series:
@@ -148,15 +135,8 @@ def choose_by_sum(cands: List[pd.Series]) -> pd.Series:
     idx = int(np.nanargmax(sums))
     return cands[idx].astype(float).fillna(0.0)
 
-# ---------------- Demand (mean/std or cv) ----------------
+# ---------------- Read +2..+5 demand (mean & std or cv) ----------------
 def read_demand_mean_std_or_cv(xl_path: str):
-    """
-    Read the consolidated +2..+5 Year Product Demand sheet:
-    - Scan all possible mean headers (rows with 'Year' and multiple family labels).
-    - For each year, collect all candidate rows beneath each mean header and pick the max-sum series.
-    - For Std: prefer 'Standard Deviation' blocks; otherwise read 'CV' blocks and convert to Std.
-    - Return unified family order and year-mapped Series for mean and std.
-    """
     xls = pd.ExcelFile(xl_path)
     sheet = None
     for cand in ["+2 to +5 Year Product Demand ", "+2 to +5 Year Product Demand"]:
@@ -167,7 +147,7 @@ def read_demand_mean_std_or_cv(xl_path: str):
         raise ValueError("Sheet '+2 to +5 Year Product Demand' not found.")
     raw = pd.read_excel(xl_path, sheet_name=sheet, header=None)
 
-    # --- Find ALL mean headers (rows with 'Year' and >=3 family labels) ---
+    # Mean headers
     mean_headers = []
     for r in range(min(200, raw.shape[0])):
         labels = row_labels_map(raw.iloc[r].tolist())
@@ -178,9 +158,9 @@ def read_demand_mean_std_or_cv(xl_path: str):
                 fam_cols  = {f: labels[f] for f in fam_order if f in labels}
                 mean_headers.append((r, fam_order, fam_cols, labels["Year"]))
     if not mean_headers:
-        raise ValueError("Mean header row not found (need a row with 'Year' and multiple family labels).")
+        raise ValueError("Mean header row not found (need 'Year' and multiple family labels).")
 
-    # Build a unified family order from all mean headers (preserves first-seen order)
+    # Unified family order
     family_seen = []
     for r, fam_order, _, _ in mean_headers:
         for f in fam_order:
@@ -188,10 +168,9 @@ def read_demand_mean_std_or_cv(xl_path: str):
                 family_seen.append(f)
     fam_order_unified = family_seen
 
-    # Collect mean candidates for each year across ALL mean headers
+    # Mean candidates
     mean_cands: Dict[str, List[pd.Series]] = {f"+{y}": [] for y in YEARS}
     for r, fam_order, fam_cols, ycol in mean_headers:
-        # Expand to unified order; only keep families present in this header
         fam_cols_expanded = {f: fam_cols.get(f, None) for f in fam_order_unified}
         local_order = [f for f in fam_order_unified if fam_cols_expanded.get(f) is not None]
         local_cols  = {f: fam_cols_expanded[f] for f in local_order}
@@ -208,7 +187,7 @@ def read_demand_mean_std_or_cv(xl_path: str):
             raise ValueError(f"No mean candidates found for {tag}.")
         mean_by_year[tag] = chosen
 
-    # --- Standard Deviation block(s): prefer absolute Std; else CV -> Std ---
+    # Std or CV blocks
     nrows, ncols = raw.shape
     std_titles = []
     for r in range(min(nrows, 400)):
@@ -219,7 +198,6 @@ def read_demand_mean_std_or_cv(xl_path: str):
     std_cands: Dict[str, List[pd.Series]] = {f"+{y}": [] for y in YEARS}
     used_cv = False
 
-    # Try Std blocks
     for title_row in std_titles:
         for r in range(title_row+1, min(title_row+40, nrows)):
             labels = row_labels_map(raw.iloc[r].tolist())
@@ -235,7 +213,7 @@ def read_demand_mean_std_or_cv(xl_path: str):
                 for s in ser_list:
                     std_cands[tag].append(s.reindex(fam_order_unified).fillna(0.0))
 
-    # If no Std candidates for all years, try CV blocks
+    # If no Std, try CV -> Std
     if all(len(v) == 0 for v in std_cands.values()):
         cv_titles = []
         for r in range(min(nrows, 400)):
@@ -267,11 +245,10 @@ def read_demand_mean_std_or_cv(xl_path: str):
         tag = f"+{y}"
         chosen_std = choose_by_sum(std_cands[tag])
         if chosen_std.empty:
-            # No std anywhere -> zeros (robust becomes mean)
             chosen_std = pd.Series([0.0]*len(fam_order_unified), index=fam_order_unified, dtype="float64")
         std_by_year[tag] = chosen_std
 
-    # Diagnostics to quickly spot scaling issues
+    # Quick diagnostics
     for y in YEARS:
         tag = f"+{y}"
         mean_s = mean_by_year[tag]
@@ -286,12 +263,6 @@ def read_demand_mean_std_or_cv(xl_path: str):
 
 # ---------------- BOM reading (robust) ----------------
 def read_bom_consolidated(xl_path: str, fam_order: List[str]) -> pd.DataFrame:
-    """
-    Hardened BOM reader:
-    - Detect the 'Part' column by counting Pxx matches per column.
-    - Detect each requested family column by scanning the header region (top ~80 rows).
-      Missing family columns are filled with zeros (warning only).
-    """
     xls = pd.ExcelFile(xl_path)
     sheet = None
     for cand in ["+2 to +5 Year Parts per Product", "+2 to +5 Year Parts per Product "]:
@@ -303,7 +274,7 @@ def read_bom_consolidated(xl_path: str, fam_order: List[str]) -> pd.DataFrame:
     raw = pd.read_excel(xl_path, sheet_name=sheet, header=None)
     nrows, ncols = raw.shape
 
-    # 1) Detect 'Part' column via Pxx frequency
+    # Detect 'Part' column via Pxx frequency
     part_col, best_hits = None, -1
     for c in range(ncols):
         hits = raw.iloc[:min(600, nrows), c].astype(str).str.fullmatch(r"P\d+").sum()
@@ -312,7 +283,7 @@ def read_bom_consolidated(xl_path: str, fam_order: List[str]) -> pd.DataFrame:
     if part_col is None or best_hits < 5:
         raise ValueError("BOM: cannot detect 'Part' column by Pxx frequency.")
 
-    # 2) Detect family columns in the header region
+    # Detect family columns in the header region
     fam_to_col = {}
     for f in fam_order:
         found = False
@@ -329,7 +300,7 @@ def read_bom_consolidated(xl_path: str, fam_order: List[str]) -> pd.DataFrame:
     if missing:
         print(f"[WARN] BOM missing family columns: {missing}. Treating as zeros.")
 
-    # 3) Read body until a long empty streak after data start
+    # Read body
     parts = []
     data = {f: [] for f in fam_order}
     streak = 0
@@ -351,16 +322,11 @@ def read_bom_consolidated(xl_path: str, fam_order: List[str]) -> pd.DataFrame:
 
     bom = pd.DataFrame(data, index=parts).apply(pd.to_numeric, errors="coerce").fillna(0.0)
     bom = bom.loc[natural_sort(bom.index)]
-    if float(bom.values.sum()) == 0.0:
-        print("[WARN] BOM total is zero — please verify the BOM sheet.")
     return bom
 
 # ---------------- Minutes per unit (fallback constants) ----------------
 def minutes_series() -> pd.Series:
-    """
-    If you do not have process minutes by part in the workbook, this fallback
-    vector keeps the pipeline working. Replace with your own if available.
-    """
+    """Fallback process minutes by part. Replace with real data if available."""
     steps = {
         "Part": [f"P{i}" for i in range(1, 21)],
         "Step 1": [2.5,1.25,1.75,1.0,1.5,0.75,1.0,1.25,1.75,1.5,1.25,1.0,1.25,1.0,0.75,1.25,0.75,0.75,2.25,2.0],
@@ -381,7 +347,7 @@ def compute_for_year(y: int, fam_order: List[str],
                      std_by_year: Dict[str, pd.Series],
                      bom: pd.DataFrame,
                      minutes_per_unit: pd.Series):
-    """Compute per-part capacity numbers and write three CSVs for a single year."""
+    """Compute per-part capacity numbers and write all CSVs for a single year."""
     tag = f"+{y}"
     out_dir = os.path.join(ROOT_OUT, f"Year+{y}")
     ensure_dir(out_dir)
@@ -391,11 +357,24 @@ def compute_for_year(y: int, fam_order: List[str],
     prod_std  = std_by_year[tag].astype(float).fillna(0.0)
     prod_var  = (prod_std ** 2).fillna(0.0)
 
+    # Save product-level annual & weekly (to mirror Task1)
+    prod_weekly_avg = (prod_mean / WEEKS_PER_YEAR)
+    prod_weekly_std = (prod_std  / np.sqrt(WEEKS_PER_YEAR))
+    pd.Series(prod_mean, name="Annual_Product_Mean").to_csv(os.path.join(out_dir, f"Product_Demand_Annual_Avg_Yp{y}.csv"))
+    pd.Series(prod_std,  name="Annual_Product_Std").to_csv(os.path.join(out_dir, f"Product_Demand_Annual_StdDev_Yp{y}.csv"))
+    prod_weekly_avg.rename("Weekly_Product_Mean").to_csv(os.path.join(out_dir, f"Product_Demand_Weekly_Avg_Yp{y}.csv"))
+    prod_weekly_std.rename("Weekly_Product_StdDev").to_csv(os.path.join(out_dir, f"Product_Demand_Weekly_StdDev_Yp{y}.csv"))
+
+    # Save BOM for this year folder (consistent with Task1 style)
+    bom_out = bom.copy()
+    bom_out.index.name = "Part"
+    bom_out.to_csv(os.path.join(out_dir, f"Parts_Per_Product_BOM_Yp{y}.csv"))
+
     # Per-part annual mean & std from linear combinations
     s_mean = bom.dot(prod_mean).astype(float).fillna(0.0)
     s_std  = np.sqrt((bom ** 2).dot(prod_var)).astype(float).fillna(0.0)
 
-    # Weekly
+    # Weekly per-part
     w_mean = (s_mean / WEEKS_PER_YEAR).astype(float).fillna(0.0)
     w_std  = (s_std  / np.sqrt(WEEKS_PER_YEAR)).astype(float).fillna(0.0)
 
@@ -410,29 +389,25 @@ def compute_for_year(y: int, fam_order: List[str],
     w_net   = (w_rob_units * mins).astype(float).fillna(0.0)
     w_gross = (w_net / (EFFICIENCY * RELIABILITY)).astype(float).fillna(0.0)
 
-    def pkey(p):
-        s = str(p); num = "".join(ch for ch in s if c.isdigit())
-        return (s.rstrip(num), int(num) if num else math.inf)
+    # Natural part order
+    parts_order = natural_sort([str(p) for p in s_mean.index])
 
-    # Full table (annual + weekly + robust + minutes)
+    # ---- FULL TABLE ----
     df_full = pd.DataFrame({
-        "Part": s_mean.index,
-        "Annual_Demand_Mean_Units": s_mean.values,
-        "Annual_Demand_StdDev_Units": s_std.values,
-        "Weekly_Demand_Mean_Units": w_mean.values,
-        "Weekly_Demand_StdDev_Units": w_std.values,
-        "Annual_Robust_Demand_99p5_Units": a_rob_units.values,
-        "Annual_Robust_Net_Minutes": a_net.values,
-        "Annual_Robust_Gross_Minutes": a_gross.values,
-        "Weekly_Robust_Demand_99p5_Units": w_rob_units.values,
-        "Weekly_Robust_Net_Minutes": w_net.values,
-        "Weekly_Robust_Gross_Minutes": w_gross.values,
-        "Total_Minutes_Per_Unit": mins.values
+        "Annual_Demand_Mean_Units": s_mean,
+        "Annual_Demand_StdDev_Units": s_std,
+        "Weekly_Demand_Mean_Units": w_mean,
+        "Weekly_Demand_StdDev_Units": w_std,
+        "Annual_Robust_Demand_99p5_Units": a_rob_units,
+        "Annual_Robust_Net_Minutes": a_net,
+        "Annual_Robust_Gross_Minutes": a_gross,
+        "Weekly_Robust_Demand_99p5_Units": w_rob_units,
+        "Weekly_Robust_Net_Minutes": w_net,
+        "Weekly_Robust_Gross_Minutes": w_gross,
+        "Total_Minutes_Per_Unit": mins
     })
-    df_full = df_full.loc[df_full["Part"].astype(str).str.match(r"^P\d+$")]
-    # stable natural sort
-    df_full = df_full.sort_values("Part", key=lambda col: col.map(lambda s: (str(s).rstrip("".join([c for c in str(s) if c.isdigit()])),
-                                                                             int("".join([c for c in str(s) if c.isdigit()]) or 10**9))))
+    df_full.index.name = "Part"
+    df_full = df_full.loc[parts_order]
 
     # Paths
     full_out    = os.path.join(out_dir, f"Task4_Full_Capacity_Annual_Weekly_Robust_Yp{y}.csv")
@@ -440,37 +415,41 @@ def compute_for_year(y: int, fam_order: List[str],
     annual_out  = os.path.join(out_dir, f"Task4_Per_Part_Annual_Mean_Std_Robust_Yp{y}.csv")
 
     # Write full
-    df_full.to_csv(full_out, index=False)
+    df_full.to_csv(full_out)
 
-    # Weekly slice
+    # ---- WEEKLY SLICE ----
     df_weekly = df_full[[
-        "Part",
         "Weekly_Demand_Mean_Units",
         "Weekly_Demand_StdDev_Units",
         "Weekly_Robust_Demand_99p5_Units",
         "Weekly_Robust_Net_Minutes",
         "Weekly_Robust_Gross_Minutes"
     ]]
-    df_weekly.to_csv(weekly_out, index=False)
+    df_weekly.to_csv(weekly_out)
 
-    # Annual slice (NEW)
+    # ---- ANNUAL SLICE ----
     df_annual = df_full[[
-        "Part",
         "Annual_Demand_Mean_Units",
         "Annual_Demand_StdDev_Units",
         "Annual_Robust_Demand_99p5_Units",
         "Annual_Robust_Net_Minutes",
         "Annual_Robust_Gross_Minutes"
     ]]
-    df_annual.to_csv(annual_out, index=False)
+    df_annual.to_csv(annual_out)
 
-    # Traceability + diagnostics
-    (bom.mul(prod_mean, axis=1)
-        .assign(**{"Total Demand (Annual Avg)": lambda d: d.sum(axis=1)})
-        .to_csv(os.path.join(out_dir, f"Parts_Total_Demand_By_Family_AnnualAvg_Yp{y}.csv")))
-    pd.Series(prod_mean, name="Annual_Product_Mean").to_csv(os.path.join(out_dir, f"Product_Demand_Annual_Avg_Yp{y}.csv"))
-    pd.Series(prod_std,  name="Annual_Product_Std").to_csv(os.path.join(out_dir, f"Product_Demand_Annual_StdDev_Yp{y}.csv"))
+    # ---- Parts-by-family demand (Annual & Weekly), Task1-style ----
+    parts_by_fam_annual = bom.mul(prod_mean, axis=1)
+    parts_by_fam_annual["Total Demand (Annual Avg)"] = parts_by_fam_annual.sum(axis=1)
+    parts_by_fam_weekly = bom.mul(prod_weekly_avg, axis=1)
+    parts_by_fam_weekly["Total Demand (Weekly Avg)"] = parts_by_fam_weekly.sum(axis=1)
 
+    parts_by_fam_annual = parts_by_fam_annual.loc[parts_order]
+    parts_by_fam_weekly = parts_by_fam_weekly.loc[parts_order]
+
+    parts_by_fam_annual.to_csv(os.path.join(out_dir, f"Parts_Total_Demand_By_Family_AnnualAvg_Yp{y}.csv"))
+    parts_by_fam_weekly.to_csv(os.path.join(out_dir, f"Parts_Total_Demand_By_Family_WeeklyAvg_Yp{y}.csv"))
+
+    # Console diagnostics
     with np.errstate(divide='ignore', invalid='ignore'):
         ratio = (std_by_year[tag] / prod_mean.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
     med_ratio = float(np.nanmedian(ratio.values))
