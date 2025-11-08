@@ -3,7 +3,7 @@
 ISyE 6202 & 6335 - Casework 3
 Task 4: Multi-Year Capacity Plan (Years +2..+5)
 
-Outputs per year (+2..+5), all suffixed with YpN:
+Outputs per year (+2..+5), all suffixed with YpN and placed under Task4_Outcome_All_Demands/Year+N:
 - Task4_Full_Capacity_Annual_Weekly_Robust_YpN.csv
 - Task4_Per_Part_Weekly_Mean_Std_Robust_YpN.csv
 - Task4_Per_Part_Annual_Mean_Std_Robust_YpN.csv
@@ -14,6 +14,10 @@ Outputs per year (+2..+5), all suffixed with YpN:
 - Parts_Per_Product_BOM_YpN.csv
 - Parts_Total_Demand_By_Family_AnnualAvg_YpN.csv
 - Parts_Total_Demand_By_Family_WeeklyAvg_YpN.csv
+- Parts_By_Family_Weekly_Robust_Units_and_GrossMinutes_YpN.csv     (NEW: allocation consistent with FULL)
+- Task4_Audit_Reconciliation_YpN.csv                                (NEW: row-sum vs FULL)
+- Task4_Audit_Summary_YpN.txt                                       (NEW: max abs diffs)
+- Task4_Audit_FamilyColumnSums_YpN.csv                              (NEW: allocation vs naive family-first)
 """
 
 import os, re, math
@@ -26,11 +30,12 @@ from scipy.stats import norm
 # ---------------- Tunables ----------------
 EFFICIENCY      = 0.90
 RELIABILITY     = 0.98
-SERVICE_LEVEL   = 0.995
-Z               = norm.ppf(SERVICE_LEVEL)
+SERVICE_LEVEL   = 0.995                         # one-sided 99.5%
+Z               = norm.ppf(SERVICE_LEVEL)       # ≈ 2.575829
 WEEKS_PER_YEAR  = 52.0
 YEARS           = [2, 3, 4, 5]
 
+# >>> Update if your workbook filename differs <<<
 EXCEL_PATH      = "iSYE 6202 & 6335 2025 Casework 3 FaMoaSa Facility Design - Tables and Basic Layouts.xlsx"
 ROOT_OUT        = "Task4_Outcome_All_Demands"
 
@@ -322,6 +327,8 @@ def read_bom_consolidated(xl_path: str, fam_order: List[str]) -> pd.DataFrame:
 
     bom = pd.DataFrame(data, index=parts).apply(pd.to_numeric, errors="coerce").fillna(0.0)
     bom = bom.loc[natural_sort(bom.index)]
+    if float(bom.values.sum()) == 0.0:
+        print("[WARN] BOM total is zero — please verify the BOM sheet.")
     return bom
 
 # ---------------- Minutes per unit (fallback constants) ----------------
@@ -392,7 +399,7 @@ def compute_for_year(y: int, fam_order: List[str],
     # Natural part order
     parts_order = natural_sort([str(p) for p in s_mean.index])
 
-    # ---- FULL TABLE ----
+    # ---- FULL TABLE (per-part totals) ----
     df_full = pd.DataFrame({
         "Annual_Demand_Mean_Units": s_mean,
         "Annual_Demand_StdDev_Units": s_std,
@@ -437,23 +444,92 @@ def compute_for_year(y: int, fam_order: List[str],
     ]]
     df_annual.to_csv(annual_out)
 
-    # ---- Parts-by-family demand (Annual & Weekly), Task1-style ----
+    # ---- Parts-by-family demand (Annual & Weekly), Task1-style means ----
     parts_by_fam_annual = bom.mul(prod_mean, axis=1)
     parts_by_fam_annual["Total Demand (Annual Avg)"] = parts_by_fam_annual.sum(axis=1)
     parts_by_fam_weekly = bom.mul(prod_weekly_avg, axis=1)
     parts_by_fam_weekly["Total Demand (Weekly Avg)"] = parts_by_fam_weekly.sum(axis=1)
-
     parts_by_fam_annual = parts_by_fam_annual.loc[parts_order]
     parts_by_fam_weekly = parts_by_fam_weekly.loc[parts_order]
-
     parts_by_fam_annual.to_csv(os.path.join(out_dir, f"Parts_Total_Demand_By_Family_AnnualAvg_Yp{y}.csv"))
     parts_by_fam_weekly.to_csv(os.path.join(out_dir, f"Parts_Total_Demand_By_Family_WeeklyAvg_Yp{y}.csv"))
+
+    # ---- Parts×Family Weekly ROBUST (Units & Gross Minutes) — CONSISTENT WITH FULL ----
+    fam_weekly_mean = prod_weekly_avg
+    fam_weekly_std  = prod_weekly_std
+    fam_weekly_var  = fam_weekly_std ** 2
+
+    # Mean & variance contribution matrices by family
+    mean_mat = bom.mul(fam_weekly_mean, axis=1)                    # (parts x families)
+    var_mat  = (bom ** 2).mul(fam_weekly_var, axis=1)              # (parts x families)
+
+    # Per-part totals (same as df_full weekly)
+    M_part   = mean_mat.sum(axis=1)
+    std_part = np.sqrt(var_mat.sum(axis=1))
+
+    # Allocate z*std_part back to families by std contribution weights
+    std_contrib = np.sqrt(var_mat).fillna(0.0)                     # sqrt of per-family var contrib
+    denom = std_contrib.sum(axis=1).replace(0.0, np.nan)
+    weights = std_contrib.div(denom, axis=0).fillna(0.0)
+
+    addend = (Z * std_part).rename("ZStd")                         # per part vector
+    addend_mat = weights.mul(addend, axis=0)
+    robust_units_mat = mean_mat + addend_mat                       # per-part-family robust units
+
+    # Robust Gross Minutes per part-family
+    robust_gross_minutes_mat = robust_units_mat.mul(mins, axis=0) / (EFFICIENCY * RELIABILITY)
+
+    # Export the combined table
+    out_units = robust_units_mat.copy()
+    out_minutes = robust_gross_minutes_mat.copy()
+    out_minutes.columns = [f"{c}_GrossMin" for c in out_minutes.columns]
+
+    combo = pd.concat([out_units, out_minutes], axis=1)
+    combo["Total Weekly Robust Units"] = out_units.sum(axis=1)
+    combo["Total Weekly Robust Gross Minutes"] = out_minutes.sum(axis=1)
+    combo = combo.loc[parts_order]
+    combo.to_csv(os.path.join(out_dir, f"Parts_By_Family_Weekly_Robust_Units_and_GrossMinutes_Yp{y}.csv"))
+
+    # ---- AUDIT: Reconcile per-part sums with FULL ----
+    row_sum_units = out_units.sum(axis=1)
+    row_sum_gross = out_minutes.sum(axis=1)
+    full_units = w_rob_units.rename("Full_Weekly_Robust_Units")
+    full_gross = w_gross.rename("Full_Weekly_Robust_Gross_Minutes")
+
+    audit = pd.concat([
+        row_sum_units.rename("ByFamily_RowSum_Units"),
+        full_units,
+        (row_sum_units - full_units).rename("Diff_Units"),
+        row_sum_gross.rename("ByFamily_RowSum_GrossMin"),
+        full_gross,
+        (row_sum_gross - full_gross).rename("Diff_GrossMin")
+    ], axis=1).loc[parts_order]
+    audit_out = os.path.join(out_dir, f"Task4_Audit_Reconciliation_Yp{y}.csv")
+    audit.to_csv(audit_out)
+
+    tol_units = float(audit["Diff_Units"].abs().max())
+    tol_gross = float(audit["Diff_GrossMin"].abs().max())
+    summary_txt = os.path.join(out_dir, f"Task4_Audit_Summary_Yp{y}.txt")
+    with open(summary_txt, "w", encoding="utf-8") as f:
+        f.write("Task4 per-part reconciliation (By-Family vs FULL)\n")
+        f.write(f"Max |Diff_Units|     = {tol_units:.6g}\n")
+        f.write(f"Max |Diff_GrossMin|  = {tol_gross:.6g}\n")
+        f.write("Note: values ~1e-12..1e-6 indicate floating-point round-off only.\n")
+
+    # Transparency only: compare family column sums (allocation vs naive family-first robust)
+    naive_units = bom.mul(fam_weekly_mean + Z * fam_weekly_std, axis=1)
+    family_alloc_totals = out_units.sum(axis=0).rename("Allocated_Robust_Units_ColSum")
+    family_naive_totals = naive_units.sum(axis=0).rename("Naive_Robust_Units_ColSum")
+    pd.concat([family_alloc_totals, family_naive_totals], axis=1).to_csv(
+        os.path.join(out_dir, f"Task4_Audit_FamilyColumnSums_Yp{y}.csv")
+    )
 
     # Console diagnostics
     with np.errstate(divide='ignore', invalid='ignore'):
         ratio = (std_by_year[tag] / prod_mean.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
     med_ratio = float(np.nanmedian(ratio.values))
     print(f"[CHECK] {tag}: parts={len(df_full)} | sum(product means)={float(prod_mean.sum()):.0f} | median(std/mean)={med_ratio:.3f}")
+    print(f"[AUDIT] Max |Diff Units|={tol_units:.6g} | Max |Diff GrossMin|={tol_gross:.6g}")
     print(f"✅ Year +{y}: wrote outputs to {out_dir}")
 
 # ---------------- Entrypoint ----------------
