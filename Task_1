@@ -1,10 +1,15 @@
 # ============================================================
 # ISyE 6202 & 6335 - Casework 3
-# Task 1 (subset): Per-Part Weekly Peak (Robust) Demand, Year +1
-# - Uses weekly means & CVs from screenshot
-# - Multiplies by BOM from "+1 Year Parts per Product"
-# - Peak = mean * (1 + z * CV), z = 2.575829 (99.5%)
-# - Output: Task1_Weekly_Peak_Parts_Yp1.csv
+# Task 1: Weekly Robust Units → Minutes (Year +1)
+# - Weekly means & CVs: from screenshot (A1..B2)
+# - BOM: "+1 Year Parts per Product"
+# - Minutes/unit: HARD-CODED from process-time screenshot (Step1..Step7)
+# - Robust weekly units = mean * (1 + z*CV), z = 2.575829 (99.5%)
+# - Weekly_Robust_Gross_Minutes = Units_robust * Minutes_per_Unit
+# - Weekly_Robust_Adj_Minutes   = Gross_Minutes / (0.90*0.98)
+# Outputs:
+#   1) Task1_Weekly_Peak_Parts_Yp1.csv
+#   2) Task1_Weekly_Peak_Units_and_Minutes_Yp1.csv
 # ============================================================
 
 import os
@@ -12,66 +17,113 @@ import re
 import pandas as pd
 from scipy.stats import norm
 
-# -------------------- Paths --------------------
-EXCEL_PATH = "iSYE 6202 & 6335 2025 Casework 3 FaMoaSa Facility Design - Tables and Basic Layouts.xlsx"
-OUT_DIR    = "Task1_Outcome"  # <== 保证是非空目录
-OUT_CSV    = os.path.join(OUT_DIR, "Task1_Weekly_Peak_Parts_Yp1.csv")
+# ---------- Paths ----------
+EXCEL_MAIN   = "iSYE 6202 & 6335 2025 Casework 3 FaMoaSa Facility Design - Tables and Basic Layouts.xlsx"
+OUT_DIR      = "Task1_Outcome"
+OUT_UNITS    = os.path.join(OUT_DIR, "Task1_Weekly_Peak_Parts_Yp1.csv")
+OUT_WITH_MIN = os.path.join(OUT_DIR, "Task1_Weekly_Peak_Units_and_Minutes_Yp1.csv")
 
-# -------------------- Parameters --------------------
-Z = float(norm.ppf(0.995))  # 99.5%
+# ---------- Demand params ----------
+Z = float(norm.ppf(0.995))   # 99.5%
+EFFICIENCY  = 0.90
+RELIABILITY = 0.98
 
-# Weekly means & CVs from the screenshot
+# Weekly means & CVs (from your screenshot)
 WEEKLY_MEANS = {"A1": 962, "A2": 1923, "A3": 2500, "B1": 1154, "B2": 1538}
 WEEKLY_CVS   = {"A1": 0.15, "A2": 0.20, "A3": 0.20, "B1": 0.12, "B2": 0.18}
-PRODUCTS = ["A1", "A2", "A3", "B1", "B2"]
+PRODUCTS     = ["A1", "A2", "A3", "B1", "B2"]
 
-# -------------------- Helpers --------------------
+# ---------- Process times HARD-CODED from screenshot ----------
+# Missing steps are treated as 0.0
+PROCESS_STEPS = {
+    "P1":  [2.5, 1.0, 2.5, 0.5, 2.5, 1.25, 2.5],
+    "P2":  [1.25, 0.5, 2.5, 1.0, 2.5],
+    "P3":  [1.75, 3.0, 0.75, 1.5, 2.5],
+    "P4":  [1.0, 2.0, 3.0, 0.25, 1.25],
+    "P5":  [1.5, 0.75, 3.5, 1.75],
+    "P6":  [0.75, 1.25, 0.5, 3.0, 1.0, 1.25, 2.75],
+    "P7":  [1.0, 1.5, 0.75, 3.5, 1.25, 2.0],
+    "P8":  [1.25, 2.0, 0.5, 1.0],
+    "P9":  [1.75, 0.75, 1.25, 0.5, 1.25, 3.0],
+    "P10": [1.5, 1.75, 1.25, 2.0],
+    "P11": [1.25, 0.5, 1.25, 0.25, 0.75],
+    "P12": [1.0, 0.5, 1.0, 1.25, 2.25],
+    "P13": [1.25, 1.25, 0.5, 1.0, 0.25, 2.0, 1.25],
+    "P14": [1.0, 1.5, 0.5, 1.75],
+    "P15": [0.75, 0.5, 1.25, 2.5, 2.5],
+    "P16": [1.25, 5.0, 1.25, 2.5],
+    "P17": [0.75, 3.0, 3.5],
+    "P18": [0.75, 1.25, 0.5, 3.75],
+    "P19": [2.25, 2.5, 2.0, 3.75],
+    "P20": [2.0, 0.75, 3.0],
+}
+
+# ---------- Helpers ----------
 def natural_key(s: str):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(s))]
 
-def load_bom_table(excel_path: str) -> pd.DataFrame:
+def load_bom(path: str) -> pd.DataFrame:
     """
-    Read '+1 Year Parts per Product' sheet.
-    In the provided workbook, header row is row 10 (0-indexed),
-    and 'Part' is in column 'Unnamed: 1'.
+    '+1 Year Parts per Product' sheet (header at row 10).
+    In this workbook, 'Part' header appears under 'Unnamed: 1'.
     """
-    df = pd.read_excel(excel_path, sheet_name="+1 Year Parts per Product", header=10)
+    df = pd.read_excel(path, sheet_name="+1 Year Parts per Product", header=10)
     if "Unnamed: 1" in df.columns and "Part" not in df.columns:
         df = df.rename(columns={"Unnamed: 1": "Part"})
-    needed = ["Part"] + PRODUCTS
-    missing = [c for c in needed if c not in df.columns]
+    need = ["Part"] + PRODUCTS
+    missing = [c for c in need if c not in df.columns]
     if missing:
-        raise RuntimeError(f"Missing required columns in BOM sheet: {missing}")
-    bom = df[needed].copy().dropna(subset=["Part"])
-    bom["Part"] = bom["Part"].astype(str).str.strip().str.upper()
+        raise RuntimeError(f"Missing columns in BOM: {missing}")
+    df = df[need].dropna(subset=["Part"]).copy()
+    df["Part"] = df["Part"].astype(str).str.strip().str.upper()
     for p in PRODUCTS:
-        bom[p] = pd.to_numeric(bom[p], errors="coerce").fillna(0.0)
-    # keep P1..Pn and natural sort
-    bom = bom[bom["Part"].str.match(r"^P\d+$", na=False)].copy()
-    bom = bom.sort_values("Part", key=lambda s: s.map(natural_key)).reset_index(drop=True)
-    return bom
+        df[p] = pd.to_numeric(df[p], errors="coerce").fillna(0.0)
+    df = df[df["Part"].str.match(r"^P\d+$", na=False)].copy()
+    df = df.sort_values("Part", key=lambda s: s.map(natural_key)).reset_index(drop=True)
+    return df
 
-def compute_weekly_product_peaks(means: dict, cvs: dict, z: float) -> dict:
-    return {k: means[k] * (1.0 + z * cvs[k]) for k in means.keys()}
+def product_weekly_peaks(means: dict, cvs: dict, z: float) -> dict:
+    return {k: means[k] * (1.0 + z * cvs[k]) for k in means}
 
-# -------------------- Main --------------------
-def main():
-    bom = load_bom_table(EXCEL_PATH)
-    product_weekly_peaks = compute_weekly_product_peaks(WEEKLY_MEANS, WEEKLY_CVS, Z)
-
+def calc_units_robust(bom: pd.DataFrame) -> pd.DataFrame:
+    peaks = product_weekly_peaks(WEEKLY_MEANS, WEEKLY_CVS, Z)
+    tmp = bom.copy()
     for k in PRODUCTS:
-        bom[f"{k}_weekly_peak_units"] = bom[k] * product_weekly_peaks[k]
+        tmp[f"{k}_Weekly_Robust_Units"] = tmp[k] * peaks[k]
+    cols = [f"{k}_Weekly_Robust_Units" for k in PRODUCTS]
+    tmp["Weekly_Robust_Total_Units"] = tmp[cols].sum(axis=1)
+    return tmp[["Part", "Weekly_Robust_Total_Units"] + cols].round(6)
 
-    peak_cols = [f"{k}_weekly_peak_units" for k in PRODUCTS]
-    bom["Weekly_Peak_Total_Units"] = bom[peak_cols].sum(axis=1)
+def minutes_per_unit_from_steps(part_id: str) -> float:
+    steps = PROCESS_STEPS.get(part_id, [])
+    return float(sum(steps)) if steps else 0.0
 
-    out = bom[["Part", "Weekly_Peak_Total_Units"] + peak_cols].round(3)
+# ---------- Main ----------
+def main():
+    bom   = load_bom(EXCEL_MAIN)
+    units = calc_units_robust(bom)  # per-part robust units/week
 
-    # Safe save
-    if OUT_DIR:
-        os.makedirs(OUT_DIR, exist_ok=True)
-    out.to_csv(OUT_CSV, index=False)
-    print(f"✅ Saved to: {OUT_CSV}")
+    # Compute Minutes_per_Unit from the hard-coded steps
+    units["Minutes_per_Unit"] = units["Part"].map(minutes_per_unit_from_steps).fillna(0.0)
+
+    # Minutes (gross & adjusted)
+    units["Weekly_Robust_Gross_Minutes"] = units["Weekly_Robust_Total_Units"] * units["Minutes_per_Unit"]
+    units["Weekly_Robust_Adj_Minutes"]   = units["Weekly_Robust_Gross_Minutes"] / (EFFICIENCY * RELIABILITY)
+    units["Weekly_Robust_Effective_Hours"] = units["Weekly_Robust_Adj_Minutes"] / 60.0
+
+    # Save
+    os.makedirs(OUT_DIR, exist_ok=True)
+    # file 1: units only（与之前保持兼容）
+    units_only_cols = ["Part", "Weekly_Robust_Total_Units"] + [c for c in units.columns if c.endswith("_Weekly_Robust_Units")]
+    units[["Part", "Weekly_Robust_Total_Units"]].to_csv(OUT_UNITS, index=False)
+
+    # file 2: units + minutes
+    out_cols = [
+        "Part", "Weekly_Robust_Total_Units", "Minutes_per_Unit",
+        "Weekly_Robust_Gross_Minutes", "Weekly_Robust_Adj_Minutes", "Weekly_Robust_Effective_Hours"
+    ]
+    units[out_cols].round(6).to_csv(OUT_WITH_MIN, index=False)
+    print("Saved:\n -", OUT_UNITS, "\n -", OUT_WITH_MIN)
 
 if __name__ == "__main__":
     main()
